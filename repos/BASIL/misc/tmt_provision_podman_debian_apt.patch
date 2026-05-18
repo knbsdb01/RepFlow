@@ -1,0 +1,11 @@
+--- package_managers/apt.py
++++ package_managers/apt_modified.py
+@@ -96,7 +96,7 @@
+         return (command, options)
+ 
+     def _enable_apt_file(self) -> ShellScript:
+-        return ShellScript(
++        return self.refresh_metadata() & ShellScript(
+             f'( {self.install(Package("apt-file"))} ) && '
+             f'{self.guest.facts.sudo_prefix} apt-file update'
+         )

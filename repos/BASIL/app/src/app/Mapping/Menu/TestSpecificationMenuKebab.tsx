@@ -1,0 +1,177 @@
+import React from 'react'
+import * as Constants from '../../Constants/constants'
+import { Dropdown, DropdownItem, DropdownList, MenuToggle, MenuToggleElement } from '@patternfly/react-core'
+import EllipsisVIcon from '@patternfly/react-icons/dist/esm/icons/ellipsis-v-icon'
+import { ActionButtons } from '@app/Common/Actions/ActionButtons'
+import { useAuth } from '@app/User/AuthProvider'
+
+export interface TestSpecificationMenuKebabProps {
+  indirect
+  setCommentModalInfo
+  setForkModalInfo
+  setHistoryModalInfo
+  setDetailsModalInfo
+  setUsageModalInfo
+  setTcModalInfo
+  setTsModalInfo
+  setDeleteModalInfo
+  mappingParentType
+  mappingParentRelatedToType
+  mappingIndex
+  mappingList
+  api
+  mappingSection
+  mappingOffset
+}
+
+export const TestSpecificationMenuKebab: React.FunctionComponent<TestSpecificationMenuKebabProps> = ({
+  indirect,
+  setCommentModalInfo,
+  setForkModalInfo,
+  setHistoryModalInfo,
+  setDetailsModalInfo,
+  setUsageModalInfo,
+  setTcModalInfo,
+  setTsModalInfo,
+  setDeleteModalInfo,
+  mappingParentType,
+  mappingParentRelatedToType,
+  mappingIndex,
+  mappingList,
+  api,
+  mappingSection,
+  mappingOffset
+}: TestSpecificationMenuKebabProps) => {
+  const [isOpen, setIsOpen] = React.useState(false)
+  const auth = useAuth()
+
+  const onToggleClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setIsOpen(!isOpen)
+  }
+
+  const onSelect = (_e?: React.MouseEvent) => {
+    _e?.stopPropagation()
+    setIsOpen(false)
+  }
+
+  return (
+    <Dropdown
+      isOpen={isOpen}
+      onSelect={onSelect}
+      onOpenChange={(isOpen: boolean) => setIsOpen(isOpen)}
+      toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
+        <MenuToggle ref={toggleRef} aria-label='kebab dropdown toggle' variant='plain' onClick={onToggleClick} isExpanded={isOpen}>
+          <EllipsisVIcon />
+        </MenuToggle>
+      )}
+      shouldFocusToggleOnSelect
+    >
+      <DropdownList>
+        {auth.isLogged() && Constants.hasWritePermission(api) ? (
+          <React.Fragment>
+            <DropdownItem
+              value={0}
+              id={'btn-menu-test-specification-assign-test-case-' + mappingList[mappingIndex].relation_id}
+              key='assign-test-case'
+              className='success-text'
+              onClick={() =>
+                setTcModalInfo(
+                  true,
+                  true,
+                  'add',
+                  api,
+                  mappingSection,
+                  mappingOffset,
+                  Constants._TS,
+                  mappingList,
+                  mappingIndex,
+                  mappingParentType
+                )
+              }
+            >
+              Assign Test Case
+            </DropdownItem>
+            <DropdownItem
+              value={1}
+              id={'btn-menu-test-specification-delete-' + mappingList[mappingIndex].relation_id}
+              key='delete'
+              className='danger-text'
+              onClick={() =>
+                setDeleteModalInfo(true, Constants._TS, mappingParentType, mappingParentRelatedToType, mappingList, mappingIndex)
+              }
+            >
+              Delete
+            </DropdownItem>
+            <DropdownItem
+              value={2}
+              id={'btn-menu-test-specification-edit-' + mappingList[mappingIndex].relation_id}
+              key='edit'
+              onClick={() =>
+                setTsModalInfo(
+                  true,
+                  indirect,
+                  'edit',
+                  api,
+                  mappingSection,
+                  mappingOffset,
+                  mappingParentType,
+                  mappingList,
+                  mappingIndex,
+                  mappingParentRelatedToType
+                )
+              }
+            >
+              Edit
+            </DropdownItem>
+            <DropdownItem
+              value={3}
+              id={'btn-menu-test-specification-fork-' + mappingList[mappingIndex].relation_id}
+              name={'btn-menu-test-specification-fork'}
+              key='fork'
+              onClick={() =>
+                setForkModalInfo(true, Constants._TS, mappingParentType, mappingParentRelatedToType, mappingList, mappingIndex)
+              }
+            >
+              Fork
+            </DropdownItem>
+          </React.Fragment>
+        ) : (
+          ''
+        )}
+
+        <DropdownItem
+          value={4}
+          key='history'
+          onClick={() => setHistoryModalInfo(true, Constants._TS, mappingParentType, mappingList[mappingIndex].relation_id)}
+        >
+          History
+        </DropdownItem>
+        <DropdownItem
+          value={5}
+          key='show-details'
+          onClick={() => setDetailsModalInfo(true, Constants._TS, mappingList[mappingIndex][Constants._TS_]['id'])}
+        >
+          Show Details
+        </DropdownItem>
+        <DropdownItem
+          value={6}
+          key='comments'
+          id={'btn-menu-test-specification-comments-' + mappingList[mappingIndex].relation_id}
+          onClick={() => setCommentModalInfo(true, Constants._TS, mappingParentType, mappingParentRelatedToType, mappingList, mappingIndex)}
+        >
+          Comments
+        </DropdownItem>
+        <DropdownItem
+          value={7}
+          key='usage'
+          onClick={() => setUsageModalInfo(true, Constants._TS, mappingList[mappingIndex][Constants._TS_]['id'])}
+        >
+          Usage
+        </DropdownItem>
+
+        <ActionButtons workItemType={Constants._TS_} />
+      </DropdownList>
+    </Dropdown>
+  )
+}

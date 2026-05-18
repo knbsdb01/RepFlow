@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hedwig-cg"
+version = "0.14.1"
+description = "Local-first code graph builder with hybrid vector + graph search"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "labyu" }]
+keywords = ["code-graph", "vector-search", "graphrag", "code-analysis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+
+readme = "README.md"
+
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "networkx>=3.2",
+    "tree-sitter>=0.24",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-rust>=0.23",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-c>=0.23",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-c-sharp>=0.23",
+    "tree-sitter-ruby>=0.23",
+    "tree-sitter-scala>=0.23",
+    "tree-sitter-lua>=0.5",
+    "tree-sitter-php>=0.23",
+    "tree-sitter-elixir>=0.3",
+    "tree-sitter-kotlin>=1.0",
+    "tree-sitter-objc>=3.0",
+    "tree-sitter-swift>=0.0.1",
+    "sentence-transformers>=3.0",
+    "faiss-cpu>=1.7.4",
+    "leidenalg>=0.10",
+    "igraph>=0.11",
+    "numpy>=1.26",
+    "pathspec>=0.12",
+    "pyyaml>=6.0",
+    "python-hcl2>=4.3",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.urls]
+Homepage = "https://github.com/hedwig-ai/hedwig-code-graph"
+Repository = "https://github.com/hedwig-ai/hedwig-code-graph"
+Issues = "https://github.com/hedwig-ai/hedwig-code-graph/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov", "ruff", "mcp>=1.0"]
+docs = ["pymupdf>=1.24"]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+hedwig-cg = "hedwig_cg.cli.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hedwig_cg"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=hedwig_cg --cov-report=term-missing"

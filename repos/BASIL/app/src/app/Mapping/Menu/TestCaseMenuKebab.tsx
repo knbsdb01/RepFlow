@@ -1,0 +1,218 @@
+import React from 'react'
+import * as Constants from '../../Constants/constants'
+import { Dropdown, DropdownItem, DropdownList, MenuToggle, MenuToggleElement } from '@patternfly/react-core'
+import EllipsisVIcon from '@patternfly/react-icons/dist/esm/icons/ellipsis-v-icon'
+import { ActionButtons } from '@app/Common/Actions/ActionButtons'
+import { useAuth } from '@app/User/AuthProvider'
+
+export interface TestCaseMenuKebabProps {
+  indirect
+  setCommentModalInfo
+  setForkModalInfo
+  setHistoryModalInfo
+  setDetailsModalInfo
+  setImplementationModalInfo
+  setUsageModalInfo
+  setTcModalInfo
+  setDeleteModalInfo
+  setTestRunModalInfo
+  setTestResultsModalInfo
+  mappingParentType
+  mappingParentRelatedToType
+  mappingIndex
+  mappingList
+  api
+  mappingSection
+  mappingOffset
+}
+
+export const TestCaseMenuKebab: React.FunctionComponent<TestCaseMenuKebabProps> = ({
+  indirect,
+  setCommentModalInfo,
+  setForkModalInfo,
+  setHistoryModalInfo,
+  setDetailsModalInfo,
+  setImplementationModalInfo,
+  setUsageModalInfo,
+  setTcModalInfo,
+  setDeleteModalInfo,
+  setTestRunModalInfo,
+  setTestResultsModalInfo,
+  mappingParentType,
+  mappingParentRelatedToType,
+  mappingIndex,
+  mappingList,
+  api,
+  mappingSection,
+  mappingOffset
+}: TestCaseMenuKebabProps) => {
+  const [isOpen, setIsOpen] = React.useState(false)
+  const auth = useAuth()
+
+  const onToggleClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setIsOpen(!isOpen)
+  }
+
+  const onSelect = (_e?: React.MouseEvent) => {
+    _e?.stopPropagation()
+    setIsOpen(false)
+  }
+
+  return (
+    <Dropdown
+      isOpen={isOpen}
+      onSelect={onSelect}
+      onOpenChange={(isOpen: boolean) => setIsOpen(isOpen)}
+      toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
+        <MenuToggle
+          id={'btn-menu-test-case-kebab-' + mappingList[mappingIndex].relation_id}
+          ref={toggleRef}
+          aria-label='kebab dropdown toggle'
+          variant='plain'
+          onClick={onToggleClick}
+          isExpanded={isOpen}
+        >
+          <EllipsisVIcon />
+        </MenuToggle>
+      )}
+      shouldFocusToggleOnSelect
+    >
+      <DropdownList>
+        {auth.isLogged() && Constants.hasWritePermission(api) ? (
+          <>
+            <DropdownItem
+              value={0}
+              id={'btn-menu-test-case-delete-' + mappingList[mappingIndex].relation_id}
+              key='delete'
+              className='danger-text'
+              onClick={() =>
+                setDeleteModalInfo(true, Constants._TC, mappingParentType, mappingParentRelatedToType, mappingList, mappingIndex)
+              }
+            >
+              Delete
+            </DropdownItem>
+            <DropdownItem
+              value={1}
+              id={'btn-menu-test-case-edit-' + mappingList[mappingIndex].relation_id}
+              key='edit'
+              onClick={() =>
+                setTcModalInfo(
+                  true,
+                  indirect,
+                  'edit',
+                  api,
+                  mappingSection,
+                  mappingOffset,
+                  mappingParentType,
+                  mappingList,
+                  mappingIndex,
+                  mappingParentRelatedToType
+                )
+              }
+            >
+              Edit
+            </DropdownItem>
+            <DropdownItem
+              value={2}
+              id={'btn-menu-test-case-fork-' + mappingList[mappingIndex].relation_id}
+              name={'btn-menu-test-case-fork'}
+              key='fork'
+              onClick={() =>
+                setForkModalInfo(true, Constants._TC, mappingParentType, mappingParentRelatedToType, mappingList, mappingIndex)
+              }
+            >
+              Fork
+            </DropdownItem>
+          </>
+        ) : (
+          ''
+        )}
+
+        <DropdownItem
+          value={3}
+          key='history'
+          id={'btn-menu-test-case-history-' + mappingList[mappingIndex].relation_id}
+          onClick={() => setHistoryModalInfo(true, Constants._TC, mappingParentType, mappingList[mappingIndex].relation_id)}
+        >
+          History
+        </DropdownItem>
+
+        {auth.isLogged() && Constants.hasWritePermission(api) ? (
+          <>
+            <DropdownItem
+              value={4}
+              key='run'
+              id={'btn-menu-test-case-run-' + mappingList[mappingIndex].relation_id}
+              onClick={() => setTestRunModalInfo(true, api, mappingList[mappingIndex], mappingParentType)}
+            >
+              Run
+            </DropdownItem>
+          </>
+        ) : (
+          ''
+        )}
+
+        <DropdownItem
+          value={5}
+          key='show-details'
+          id={'btn-menu-test-case-details-' + mappingList[mappingIndex].relation_id}
+          onClick={() => setDetailsModalInfo(true, Constants._TC, mappingList[mappingIndex][Constants._TC_]['id'])}
+        >
+          Show Details
+        </DropdownItem>
+
+        <DropdownItem
+          value={8}
+          key='view-implementation'
+          id={'btn-menu-test-case-implementation-' + mappingList[mappingIndex].relation_id}
+          onClick={() =>
+            setImplementationModalInfo(
+              true,
+              { id: mappingList[mappingIndex][Constants._TC_]['id'] },
+              mappingParentType?.replace('_', '-') ?? 'api',
+              mappingList[mappingIndex].relation_id
+            )
+          }
+        >
+          View implementation
+        </DropdownItem>
+
+        {Constants.hasReadPermission(api) ? (
+          <>
+            <DropdownItem
+              value={6}
+              key='test result'
+              id={'btn-menu-test-case-results-' + mappingList[mappingIndex].relation_id}
+              onClick={() => setTestResultsModalInfo(true, api, mappingList[mappingIndex], mappingParentType)}
+            >
+              Test Results
+            </DropdownItem>
+          </>
+        ) : (
+          ''
+        )}
+
+        <DropdownItem
+          value={7}
+          key='comments'
+          id={'btn-menu-test-case-comments-' + mappingList[mappingIndex].relation_id}
+          onClick={() => setCommentModalInfo(true, Constants._TC, mappingParentType, mappingParentRelatedToType, mappingList, mappingIndex)}
+        >
+          Comments
+        </DropdownItem>
+
+        <DropdownItem
+          value={8}
+          key='usage'
+          id={'btn-menu-test-case-usage-' + mappingList[mappingIndex].relation_id}
+          onClick={() => setUsageModalInfo(true, Constants._TC, mappingList[mappingIndex][Constants._TC_]['id'])}
+        >
+          Usage
+        </DropdownItem>
+
+        <ActionButtons workItemType={Constants._TC_} />
+      </DropdownList>
+    </Dropdown>
+  )
+}

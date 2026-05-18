@@ -1,0 +1,888 @@
+import * as React from 'react'
+import * as Constants from '../Constants/constants'
+import { useAuth } from '@app/User/AuthProvider'
+import { Button, Card, CardBody, Flex, FlexItem, PageSection, Title } from '@patternfly/react-core'
+import { APIExportSPDXModal } from './Modal/APIExportSPDXModal'
+import { APIExportHTMLModal } from './Modal/APIExportHTMLModal'
+import { MappingListingTable } from './MappingListingTable'
+import { MappingDynamicViewTable } from './MappingDynamicViewTable'
+import { MappingSnippetsModal } from './Modal/MappingSnippetsModal'
+import { MappingSwRequirementModal } from './Modal/MappingSwRequirementModal'
+import { MappingTestSpecificationModal } from './Modal/MappingTestSpecificationModal'
+import { MappingTestCaseModal } from './Modal/MappingTestCaseModal'
+import { MappingJustificationModal } from './Modal/MappingJustificationModal'
+import { MappingDeleteModal } from './Modal/MappingDeleteModal'
+import { MappingDetailsModal } from './Modal/MappingDetailsModal'
+import { MappingDocumentModal } from './Modal/MappingDocumentModal'
+import { MappingForkModal } from './Modal/MappingForkModal'
+import { MappingHistoryModal } from './Modal/MappingHistoryModal'
+import { MappingUsageModal } from './Modal/MappingUsageModal'
+import { MappingCommentModal } from './Modal/MappingCommentModal'
+import { TestCaseImplementationModal } from './Modal/TestCaseImplementationModal'
+import { TestResultsModal } from './Modal/TestResultsModal'
+import { TestRunModal } from './Modal/TestRunModal'
+import { Switch } from '@patternfly/react-core'
+import { MappingViewSelect } from './MappingViewSelect'
+import { LeavesProgressBar } from '../Custom/LeavesProgressBar'
+
+export interface MappingPageSectionProps {
+  mappingData
+  unmappingData
+  dynamicViewData
+  loadMappingData
+  mappingViewSelectValue
+  setMappingViewSelectValue
+  setMappingViewSelectValueOld
+  totalCoverage
+  api
+  setModalNotificationShowState
+  setModalNotificationTitle
+  setModalNotificationMessage
+}
+
+const MappingPageSection: React.FunctionComponent<MappingPageSectionProps> = ({
+  mappingData = [],
+  unmappingData = [],
+  dynamicViewData = null,
+  loadMappingData,
+  mappingViewSelectValue,
+  setMappingViewSelectValue,
+  setMappingViewSelectValueOld,
+  totalCoverage,
+  api,
+  setModalNotificationShowState,
+  setModalNotificationTitle,
+  setModalNotificationMessage
+}: MappingPageSectionProps) => {
+  const auth = useAuth()
+  const [modalAction, setModalAction] = React.useState('')
+  const [modalVerb, setModalVerb] = React.useState('')
+  // eslint-disable-next-line  @typescript-eslint/no-explicit-any
+  const [modalFormData, setModalFormData] = React.useState<any>('')
+  const [modalTitle, setModalTitle] = React.useState('')
+  const [modalIndirect, setModalIndirect] = React.useState<boolean>(false)
+  const [modalDescription, setModalDescription] = React.useState('')
+  const [modalParentData, setModalParentData] = React.useState({})
+  const [modalParentType, setModalParentType] = React.useState('')
+  const [modalParentRelatedToType, setModalParentRelatedToType] = React.useState('')
+
+  const [modalSection, setModalSection] = React.useState('')
+  const [modalOffset, setModalOffset] = React.useState('')
+
+  const [modalSPDXExportShowState, setModalSPDXExportShowState] = React.useState(false)
+  const [modalHTMLExportShowState, setModalHTMLExportShowState] = React.useState(false)
+  const [SPDXContentLoading, setSPDXContentLoading] = React.useState<boolean>(false)
+  const [SPDXContent, setSPDXContent] = React.useState('')
+  const [HTMLContentLoading, setHTMLContentLoading] = React.useState<boolean>(false)
+  const [HTMLContent, setHTMLContent] = React.useState<string>('')
+
+  const [srModalShowState, setSrModalShowState] = React.useState<boolean>(false)
+  const [tsModalShowState, setTsModalShowState] = React.useState<boolean>(false)
+  const [tcModalShowState, setTcModalShowState] = React.useState<boolean>(false)
+  const [jModalShowState, setJModalShowState] = React.useState<boolean>(false)
+  const [docModalShowState, setDocModalShowState] = React.useState<boolean>(false)
+  const [historyModalShowState, setHistoryModalShowState] = React.useState<boolean>(false)
+  const [deleteModalShowState, setDeleteModalShowState] = React.useState<boolean>(false)
+  const [detailsModalShowState, setDetailsModalShowState] = React.useState<boolean>(false)
+  const [forkModalShowState, setForkModalShowState] = React.useState<boolean>(false)
+  const [usageModalShowState, setUsageModalShowState] = React.useState<boolean>(false)
+  const [commentModalShowState, setCommentModalShowState] = React.useState<boolean>(false)
+  const [testResultsModalShowState, setTestResultsModalShowState] = React.useState<boolean>(false)
+  const [testResultDetailsModalShowState, setTestResultDetailsModalShowState] = React.useState<boolean>(false)
+  const [testRunModalShowState, setTestRunModalShowState] = React.useState<boolean>(false)
+  const [snippetsModalShowState, setSnippetsModalShowState] = React.useState<boolean>(false)
+  const [snippetsModalWorkItem, setSnippetsModalWorkItem] = React.useState<any>(null)
+  const [snippetsModalWorkItemType, setSnippetsModalWorkItemType] = React.useState('')
+
+  const [implementationModalShowState, setImplementationModalShowState] = React.useState<boolean>(false)
+  const [implementationModalData, setImplementationModalData] = React.useState<{
+    testCase: { id: number }
+    relationTo: string
+    relationId: number
+  } | null>(null)
+
+  // eslint-disable-next-line  @typescript-eslint/no-explicit-any
+  const [currentTestResult, setCurrentTestResult] = React.useState<any>({})
+
+  const [currentMappingHistory, setCurrentMappingHistory] = React.useState()
+  const [currentMappingDetails, setCurrentMappingDetails] = React.useState()
+  const [currentMappingUsage, setCurrentMappingUsage] = React.useState()
+
+  const [modalRelationData, setModalRelationData] = React.useState({})
+  const [modalWorkItemType, setModalWorkItemType] = React.useState('')
+
+  const [showIndirectTestSpecificationsOld, setShowIndirectTestSpecificationsOld] = React.useState<boolean>(true)
+  const [showIndirectTestSpecifications, setShowIndirectTestSpecifications] = React.useState<boolean>(true)
+  const [showIndirectTestCasesOld, setShowIndirectTestCasesOld] = React.useState<boolean>(true)
+  const [showIndirectTestCases, setShowIndirectTestCases] = React.useState<boolean>(true)
+  const exportFilename = React.useRef('')
+
+  const exportToFormat = (format: string = 'jsonld', config: any = {}) => {
+    if (!auth.isLogged()) {
+      return
+    }
+
+    exportFilename.current = 'latest.' + format
+
+    let query_string = '?api-id=' + api.id
+    query_string += '&user-id=' + auth.userId
+    query_string += '&token=' + auth.token
+    query_string += '&filename=' + exportFilename.current
+    query_string += '&mapping-view=' + mappingViewSelectValue
+
+    // for each key of the config add to the query string
+    for (const key in config) {
+      query_string += '&' + key + '=' + config[key]
+    }
+
+    let url
+    if (format == 'jsonld') {
+      url = Constants.API_BASE_URL + Constants.API_SPDX_API_EXPORT_ENDPOINT
+      setSPDXContentLoading(true)
+    } else if (format == 'html') {
+      url = Constants.API_BASE_URL + Constants.API_HTML_API_EXPORT_ENDPOINT
+      setHTMLContentLoading(true)
+    } else {
+      return
+    }
+
+    fetch(url + query_string)
+      .then((res) => res.json())
+      .then((data) => {
+        if (format == 'jsonld') {
+          setSPDXContent(JSON.stringify(data, null, 2))
+          setModalSPDXExportShowState(true)
+        } else if (format == 'html') {
+          setHTMLContent(data['data'])
+          setModalHTMLExportShowState(true)
+        }
+      })
+      .catch((err) => {
+        setSPDXContentLoading(false)
+        setHTMLContentLoading(false)
+        console.log(err.message)
+      })
+      .finally(() => {
+        setSPDXContentLoading(false)
+        setHTMLContentLoading(false)
+      })
+  }
+
+  const getWorkItemDescription = (_work_item_type) => {
+    const work_item_types = [Constants._A, Constants._D, Constants._J, Constants._SR, Constants._TS, Constants._TC]
+    const work_item_descriptions = ['Api', 'Document', 'Justification', 'Software Requirement', 'Test Specification', 'Test Case']
+    return work_item_descriptions[work_item_types.indexOf(_work_item_type)]
+  }
+
+  const getSwRequirementData = (_list, _index) => {
+    const sr = {
+      id: _list[_index][Constants._SR_]['id'],
+      coverage: _list[_index]['coverage'],
+      title: _list[_index][Constants._SR_]['title'],
+      description: _list[_index][Constants._SR_]['description']
+    }
+    return sr
+  }
+
+  const getTestCaseData = (_list, _index) => {
+    let tc = {}
+    tc = _list[_index][Constants._TC_]
+    tc['coverage'] = _list[_index]['coverage']
+    return tc
+  }
+
+  const getTestSpecificationData = (_list, _index) => {
+    let ts = {}
+    ts = _list[_index][Constants._TS_]
+    ts['coverage'] = _list[_index]['coverage']
+    return ts
+  }
+
+  const getJustificationData = (_list, _index) => {
+    let js = {}
+    js = _list[_index][Constants._J]
+    js['coverage'] = _list[_index]['coverage']
+    return js
+  }
+
+  const getDocumentData = (_list, _index) => {
+    let doc = {}
+    doc = _list[_index][Constants._D]
+    doc['coverage'] = _list[_index]['coverage']
+    return doc
+  }
+
+  const setSrModalInfo = (show, indirect, action, api, section, offset, parent_type, parent_list, parent_index, parent_related_to_type) => {
+    setModalTitle(getWorkItemDescription(Constants._SR))
+    setModalDescription('Work item data and mapping information (section, offset, coverage).')
+    setSrModalShowState(show)
+    setModalAction(action)
+    if (action == 'add') {
+      setModalVerb('POST')
+      setModalFormData(Constants.srFormEmpty)
+    } else if (action == 'edit') {
+      setModalVerb('PUT')
+      setModalFormData(getSwRequirementData(parent_list, parent_index))
+    }
+    setModalParentData(parent_list[parent_index])
+    setModalSection(section)
+    setModalOffset(offset)
+    setModalIndirect(indirect)
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+  }
+
+  const setTsModalInfo = (show, indirect, action, api, section, offset, parent_type, parent_list, parent_index, parent_related_to_type) => {
+    setModalTitle(getWorkItemDescription(Constants._TS))
+    setModalDescription('Work item data and mapping information (section, offset, coverage).')
+    setModalAction(action)
+    if (action == 'add') {
+      setModalVerb('POST')
+      setModalFormData(Constants.tsFormEmpty)
+    } else if (action == 'edit') {
+      setModalVerb('PUT')
+      setModalFormData(getTestSpecificationData(parent_list, parent_index))
+    }
+    setModalParentData(parent_list[parent_index])
+    setModalSection(section)
+    setModalOffset(offset)
+    setModalIndirect(indirect)
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+    setTsModalShowState(show)
+  }
+
+  const setTcModalInfo = (show, indirect, action, api, section, offset, parent_type, parent_list, parent_index, parent_related_to_type) => {
+    setModalTitle(getWorkItemDescription(Constants._TC))
+    setModalDescription('Work item data and mapping information (section, offset, coverage).')
+    setTcModalShowState(show)
+    setModalAction(action)
+    if (action == 'add') {
+      setModalVerb('POST')
+      setModalFormData(Constants.tcFormEmpty)
+    } else if (action == 'edit') {
+      setModalVerb('PUT')
+      setModalFormData(getTestCaseData(parent_list, parent_index))
+    }
+    setModalParentData(parent_list[parent_index])
+    setModalSection(section)
+    setModalOffset(offset)
+    setModalIndirect(indirect)
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+  }
+
+  const setJModalInfo = (show, action, api, section, offset, parent_list, parent_index) => {
+    setJModalShowState(show)
+    setModalAction(action)
+
+    if (action == 'add') {
+      setModalVerb('POST')
+      setModalFormData(Constants.jFormEmpty)
+    } else if (action == 'edit') {
+      setModalVerb('PUT')
+      setModalFormData(getJustificationData(parent_list, parent_index))
+    }
+
+    setModalTitle(getWorkItemDescription(Constants._J))
+    setModalDescription('Work item data and mapping information (section, offset, coverage).')
+    setModalSection(section)
+    setModalOffset(offset)
+    setModalIndirect(false)
+    setModalParentData(parent_list[parent_index])
+    setModalParentType(Constants._A)
+    setModalParentRelatedToType('')
+  }
+
+  const setModalNotificationInfo = (title, message, show) => {
+    setModalNotificationShowState(show)
+    setModalNotificationTitle(title)
+    setModalNotificationMessage(message)
+  }
+
+  const setSnippetsModalInfo = (show, workItemGroup, workItemType) => {
+    setSnippetsModalShowState(show)
+    setSnippetsModalWorkItem(workItemGroup)
+    setSnippetsModalWorkItemType(workItemType)
+  }
+
+  const setDocModalInfo = (
+    show,
+    indirect,
+    action,
+    api,
+    section,
+    offset,
+    parent_type,
+    parent_list,
+    parent_index,
+    parent_related_to_type
+  ) => {
+    setDocModalShowState(show)
+    setModalAction(action)
+
+    if (action == 'add') {
+      setModalVerb('POST')
+      setModalFormData(Constants.docFormEmpty)
+    } else if (action == 'edit') {
+      setModalVerb('PUT')
+      setModalFormData(getDocumentData(parent_list, parent_index))
+    }
+
+    setModalTitle(getWorkItemDescription(Constants._D))
+    setModalDescription('Work item data and mapping information (section, offset, coverage).')
+    setModalSection(section)
+    setModalOffset(offset)
+    setModalIndirect(indirect)
+    setModalParentData(parent_list[parent_index])
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+  }
+
+  const setDeleteModalInfo = (show, work_item_type, parent_type, parent_related_to_type, list, index) => {
+    setModalTitle('Delete selected ' + getWorkItemDescription(work_item_type))
+    setModalDescription('Do you want to continue?')
+    setModalRelationData(list[index])
+    setDeleteModalShowState(show)
+    setModalWorkItemType(work_item_type)
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+  }
+
+  const setTestRunModalInfo = (show, api, work_item, parent_type) => {
+    setModalRelationData(work_item)
+    setTestRunModalShowState(show)
+    setModalParentType(parent_type)
+  }
+
+  const setTestResultsModalInfo = (show, api, work_item, parent_type) => {
+    setModalRelationData(work_item)
+    setTestResultsModalShowState(show)
+    setModalParentType(parent_type)
+  }
+
+  const setForkModalInfo = (show, work_item_type, parent_type, parent_related_to_type, list, index) => {
+    setModalTitle('Fork selected ' + getWorkItemDescription(work_item_type))
+    setModalDescription('Do you want to continue?')
+    setModalRelationData(list[index])
+    setForkModalShowState(show)
+    setModalWorkItemType(work_item_type)
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+  }
+
+  const setCommentModalInfo = (show, work_item_type, parent_type, parent_related_to_type, list, index) => {
+    let wi_field = 'title'
+    let wi_title = ''
+    let wi_type = ''
+
+    if (work_item_type == Constants._J) {
+      wi_field = 'description'
+    }
+
+    if (work_item_type == Constants._SR) {
+      wi_type = Constants._SR_
+    } else if (work_item_type == Constants._TS) {
+      wi_type = Constants._TS_
+    } else if (work_item_type == Constants._TC) {
+      wi_type = Constants._TC_
+    } else if (work_item_type == Constants._J) {
+      wi_type = Constants._J
+    } else if (work_item_type == Constants._D) {
+      wi_type = Constants._D
+    }
+
+    wi_title = list[index][wi_type][wi_field].substr(0, 100)
+    if (list[index][wi_type][wi_field].length > 99) {
+      wi_title = wi_title + '...'
+    }
+
+    setModalTitle('Comment a ' + getWorkItemDescription(work_item_type))
+    setModalDescription(wi_title)
+    setCommentModalShowState(show)
+    setModalWorkItemType(work_item_type)
+    setModalParentType(parent_type)
+    setModalParentRelatedToType(parent_related_to_type)
+    setModalRelationData(list[index])
+  }
+
+  const setHistoryModalInfo = (show, work_item_type, mapped_to_type, relation_id) => {
+    const url =
+      Constants.API_BASE_URL +
+      Constants.API_MAPPING_HISTORY_ENDPOINT +
+      '?work_item_type=' +
+      work_item_type +
+      '&mapped_to_type=' +
+      mapped_to_type +
+      '&relation_id=' +
+      relation_id
+    fetch(url)
+      .then((res) => res.json())
+      .then((data) => {
+        setCurrentMappingHistory(data)
+        setHistoryModalShowState(show)
+      })
+      .catch((err) => {
+        console.log(err.message)
+      })
+  }
+
+  const setDetailsModalInfo = (show, work_item_type, work_item_id) => {
+    const url = Constants.API_BASE_URL + Constants.buildWorkItemRootListPath(work_item_type) + '?field1=id&filter1=' + work_item_id
+    fetch(url)
+      .then((res) => res.json())
+      .then((data) => {
+        setModalTitle(getWorkItemDescription(work_item_type) + ' details')
+        setModalDescription('')
+        setCurrentMappingDetails(data)
+        setDetailsModalShowState(show)
+      })
+      .catch((err) => {
+        console.log(err.message)
+      })
+  }
+
+  const setImplementationModalInfo = (show: boolean, testCase?: { id: number }, relationTo?: string, relationId?: number) => {
+    setImplementationModalShowState(show)
+    if (show && testCase != null && relationTo != null && relationId != null) {
+      setImplementationModalData({ testCase, relationTo, relationId })
+    }
+  }
+
+  const setUsageModalInfo = (show, work_item_type, work_item_id) => {
+    const url = Constants.API_BASE_URL + Constants.API_MAPPING_USAGE_ENDPOINT + '?work_item_type=' + work_item_type + '&id=' + work_item_id
+    fetch(url)
+      .then((res) => res.json())
+      .then((data) => {
+        setCurrentMappingUsage(data)
+        setUsageModalShowState(show)
+        setModalTitle(getWorkItemDescription(work_item_type) + ' usage')
+        setModalDescription('')
+      })
+      .catch((err) => {
+        console.log(err.message)
+      })
+  }
+
+  const toggleIndirectTestSpecifications = () => {
+    setShowIndirectTestSpecificationsOld(showIndirectTestSpecifications)
+    setShowIndirectTestSpecifications(!showIndirectTestSpecifications)
+  }
+  const toggleIndirectTestCases = () => {
+    setShowIndirectTestCasesOld(showIndirectTestCases)
+    setShowIndirectTestCases(!showIndirectTestCases)
+  }
+
+  React.useEffect(() => {
+    if (showIndirectTestSpecifications != showIndirectTestSpecificationsOld || showIndirectTestCases != showIndirectTestCasesOld) {
+      loadMappingData(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showIndirectTestSpecifications, showIndirectTestCases])
+
+  return (
+    <React.Fragment>
+      <PageSection isFilled>
+        <Card>
+          <CardBody>
+            <Flex>
+              <Flex>
+                <FlexItem>
+                  <Title headingLevel='h1'>Mapping</Title>
+                </FlexItem>
+                <FlexItem>
+                  <LeavesProgressBar progressValue={totalCoverage} progressId='api-mapping-coverage' />
+                </FlexItem>
+              </Flex>
+              {auth.isLogged() ? (
+                <Flex align={{ default: 'alignRight' }}>
+                  {Constants.hasReadPermission(api) ? (
+                    <>
+                      <FlexItem>
+                        <Button
+                          id='btn-export-sw-component-to-spdx'
+                          isDisabled={SPDXContentLoading}
+                          variant='secondary'
+                          onClick={() => exportToFormat('jsonld', {})}
+                        >
+                          {SPDXContentLoading ? 'Loading ...' : 'Export to SPDX'}
+                        </Button>
+                      </FlexItem>
+                      <FlexItem>
+                        <Button
+                          id='btn-export-sw-component-to-html'
+                          isDisabled={HTMLContentLoading}
+                          variant='secondary'
+                          onClick={() => exportToFormat('html', {})}
+                        >
+                          {HTMLContentLoading ? 'Loading ...' : 'Export to HTML/PDF'}
+                        </Button>
+                      </FlexItem>
+                    </>
+                  ) : (
+                    ''
+                  )}
+                  {auth.isLogged() && Constants.hasWritePermission(api) ? (
+                    <React.Fragment>
+                      <FlexItem>
+                        <Button
+                          variant='secondary'
+                          id='btn-mapping-new-sw-requirement'
+                          isDisabled={api?.raw_specification == null}
+                          onClick={() => setSrModalInfo(true, false, 'add', api, '', 0, Constants._A, [], -1, '')}
+                        >
+                          Map Software Req.
+                        </Button>
+                      </FlexItem>
+                      <FlexItem>
+                        <Button
+                          variant='secondary'
+                          id='btn-mapping-new-test-specification'
+                          isDisabled={api?.raw_specification == null}
+                          onClick={() => setTsModalInfo(true, false, 'add', api, '', 0, Constants._A, [], -1, '')}
+                        >
+                          Map Test Specification
+                        </Button>
+                      </FlexItem>
+                      <FlexItem>
+                        <Button
+                          variant='secondary'
+                          id='btn-mapping-new-test-case'
+                          isDisabled={api?.raw_specification == null}
+                          onClick={() => setTcModalInfo(true, false, 'add', api, '', 0, Constants._A, [], -1, '')}
+                        >
+                          Map Test Case
+                        </Button>
+                      </FlexItem>
+                      <FlexItem>
+                        <Button
+                          variant='secondary'
+                          id='btn-mapping-new-justification'
+                          isDisabled={api?.raw_specification == null}
+                          onClick={() => setJModalInfo(true, 'add', api, '', 0, [], -1)}
+                        >
+                          Map Justification
+                        </Button>
+                      </FlexItem>
+                      <FlexItem>
+                        <Button
+                          variant='secondary'
+                          id='btn-mapping-new-document'
+                          isDisabled={api?.raw_specification == null}
+                          onClick={() => setDocModalInfo(true, false, 'add', api, '', 0, Constants._A, [], -1, '')}
+                        >
+                          Map Document
+                        </Button>
+                      </FlexItem>
+                    </React.Fragment>
+                  ) : (
+                    ''
+                  )}
+                </Flex>
+              ) : (
+                ''
+              )}
+            </Flex>
+          </CardBody>
+        </Card>
+        <Card>
+          <CardBody>
+            <Flex>
+              <FlexItem>
+                <MappingViewSelect
+                  mappingViewSelectValue={mappingViewSelectValue}
+                  setMappingViewSelectValue={setMappingViewSelectValue}
+                  setMappingViewSelectValueOld={setMappingViewSelectValueOld}
+                />
+              </FlexItem>
+              <FlexItem align={{ default: 'alignRight' }}>
+                <Switch
+                  id='switch-indirect-test-specifications'
+                  label='Indirect Test Specification'
+                  labelOff='Indirect Test Specification Hidden'
+                  isChecked={showIndirectTestSpecifications}
+                  onChange={toggleIndirectTestSpecifications}
+                  ouiaId='BasicSwitch'
+                />
+              </FlexItem>
+              <FlexItem>
+                <Switch
+                  id='switch-indirect-test-cases'
+                  label='Indirect Test Case'
+                  labelOff='Indirect Test Case Hidden'
+                  isChecked={showIndirectTestCases}
+                  onChange={toggleIndirectTestCases}
+                  ouiaId='BasicSwitch'
+                />
+              </FlexItem>
+            </Flex>
+          </CardBody>
+        </Card>
+      </PageSection>
+
+      {mappingViewSelectValue === Constants._DV ? (
+        <MappingDynamicViewTable
+          api={api}
+          dynamicViewData={dynamicViewData}
+          setDocModalInfo={setDocModalInfo}
+          setTsModalInfo={setTsModalInfo}
+          setTcModalInfo={setTcModalInfo}
+          setSrModalInfo={setSrModalInfo}
+          setJModalInfo={setJModalInfo}
+          setCommentModalInfo={setCommentModalInfo}
+          setDeleteModalInfo={setDeleteModalInfo}
+          setDetailsModalInfo={setDetailsModalInfo}
+          setForkModalInfo={setForkModalInfo}
+          setHistoryModalInfo={setHistoryModalInfo}
+          setImplementationModalInfo={setImplementationModalInfo}
+          setTestResultsModalInfo={setTestResultsModalInfo}
+          setTestRunModalInfo={setTestRunModalInfo}
+          setUsageModalInfo={setUsageModalInfo}
+          setModalNotificationInfo={setModalNotificationInfo}
+          setSnippetsModalInfo={setSnippetsModalInfo}
+          showIndirectTestCases={showIndirectTestCases}
+          showIndirectTestSpecifications={showIndirectTestSpecifications}
+        />
+      ) : (
+        <MappingListingTable
+          mappingData={mappingData}
+          unmappingData={unmappingData}
+          api={api}
+          srModalShowState={srModalShowState}
+          setDocModalInfo={setDocModalInfo}
+          setTsModalInfo={setTsModalInfo}
+          setTcModalInfo={setTcModalInfo}
+          setSrModalInfo={setSrModalInfo}
+          setJModalInfo={setJModalInfo}
+          setCommentModalInfo={setCommentModalInfo}
+          setDeleteModalInfo={setDeleteModalInfo}
+          setTestRunModalInfo={setTestRunModalInfo}
+          setTestResultsModalInfo={setTestResultsModalInfo}
+          setDetailsModalInfo={setDetailsModalInfo}
+          setForkModalInfo={setForkModalInfo}
+          setHistoryModalInfo={setHistoryModalInfo}
+          setImplementationModalInfo={setImplementationModalInfo}
+          setUsageModalInfo={setUsageModalInfo}
+          mappingViewSelectValue={mappingViewSelectValue}
+          showIndirectTestCases={showIndirectTestCases}
+          showIndirectTestSpecifications={showIndirectTestSpecifications}
+          setModalNotificationInfo={setModalNotificationInfo}
+        />
+      )}
+      <MappingSwRequirementModal
+        api={api}
+        modalAction={modalAction}
+        modalDescription={modalDescription}
+        modalFormData={modalFormData}
+        modalIndirect={modalIndirect}
+        modalOffset={modalOffset}
+        setModalOffset={setModalOffset}
+        modalSection={modalSection}
+        setModalSection={setModalSection}
+        modalShowState={srModalShowState}
+        modalTitle={modalTitle}
+        modalVerb={modalVerb}
+        loadMappingData={loadMappingData}
+        parentData={modalParentData}
+        parentRelatedToType={modalParentRelatedToType}
+        parentType={modalParentType}
+        setModalShowState={setSrModalShowState}
+      />
+      <MappingTestSpecificationModal
+        api={api}
+        modalAction={modalAction}
+        modalDescription={modalDescription}
+        modalFormData={modalFormData}
+        modalIndirect={modalIndirect}
+        modalOffset={modalOffset}
+        setModalOffset={setModalOffset}
+        modalSection={modalSection}
+        setModalSection={setModalSection}
+        modalShowState={tsModalShowState}
+        modalTitle={modalTitle}
+        modalVerb={modalVerb}
+        loadMappingData={loadMappingData}
+        parentData={modalParentData}
+        parentType={modalParentType}
+        parentRelatedToType={modalParentRelatedToType}
+        setModalShowState={setTsModalShowState}
+      />
+      <MappingTestCaseModal
+        api={api}
+        modalAction={modalAction}
+        modalDescription={modalDescription}
+        modalFormData={modalFormData}
+        modalIndirect={modalIndirect}
+        modalOffset={modalOffset}
+        setModalOffset={setModalOffset}
+        modalSection={modalSection}
+        setModalSection={setModalSection}
+        modalShowState={tcModalShowState}
+        modalTitle={modalTitle}
+        modalVerb={modalVerb}
+        loadMappingData={loadMappingData}
+        parentData={modalParentData}
+        parentType={modalParentType}
+        parentRelatedToType={modalParentRelatedToType}
+        setModalShowState={setTcModalShowState}
+      />
+      <MappingJustificationModal
+        api={api}
+        modalAction={modalAction}
+        modalDescription={modalDescription}
+        modalFormData={modalFormData}
+        modalIndirect={modalIndirect}
+        modalOffset={modalOffset}
+        setModalOffset={setModalOffset}
+        modalSection={modalSection}
+        setModalSection={setModalSection}
+        modalShowState={jModalShowState}
+        modalTitle={modalTitle}
+        modalVerb={modalVerb}
+        loadMappingData={loadMappingData}
+        parentData={modalParentData}
+        parentType={modalParentType}
+        setModalShowState={setJModalShowState}
+        modalData={{}}
+        modalHistoryData={currentMappingHistory}
+        parentRelatedToType={modalParentRelatedToType}
+      />
+      <MappingDetailsModal
+        modalDescription={modalDescription}
+        modalTitle={modalTitle}
+        modalData={currentMappingDetails}
+        setModalShowState={setDetailsModalShowState}
+        modalShowState={detailsModalShowState}
+      />
+      <MappingDocumentModal
+        api={api}
+        modalAction={modalAction}
+        modalDescription={modalDescription}
+        modalFormData={modalFormData}
+        modalIndirect={modalIndirect}
+        modalOffset={modalOffset}
+        setModalOffset={setModalOffset}
+        modalSection={modalSection}
+        setModalSection={setModalSection}
+        modalShowState={docModalShowState}
+        modalTitle={modalTitle}
+        modalVerb={modalVerb}
+        loadMappingData={loadMappingData}
+        parentData={modalParentData}
+        parentType={modalParentType}
+        setModalShowState={setDocModalShowState}
+        modalData={{}}
+        modalHistoryData={currentMappingHistory}
+        parentRelatedToType={modalParentRelatedToType}
+      />
+      <MappingHistoryModal
+        modalDescription={modalDescription}
+        modalTitle={modalTitle}
+        modalData={currentMappingHistory}
+        setModalShowState={setHistoryModalShowState}
+        modalShowState={historyModalShowState}
+      />
+      <MappingUsageModal
+        modalDescription={modalDescription}
+        modalTitle={modalTitle}
+        modalData={currentMappingUsage}
+        setModalShowState={setUsageModalShowState}
+        modalShowState={usageModalShowState}
+      />
+      <MappingCommentModal
+        api={api}
+        modalDescription={modalDescription}
+        modalTitle={modalTitle}
+        relationData={modalRelationData}
+        workItemType={modalWorkItemType}
+        parentType={modalParentType}
+        //parentRelatedToType={modalParentRelatedToType}
+        setModalShowState={setCommentModalShowState}
+        modalShowState={commentModalShowState}
+        loadMappingData={loadMappingData}
+      />
+      <MappingDeleteModal
+        api={api}
+        modalTitle={modalTitle}
+        modalDescription={modalDescription}
+        setModalShowState={setDeleteModalShowState}
+        modalShowState={deleteModalShowState}
+        workItemType={modalWorkItemType}
+        parentType={modalParentType}
+        //parentRelatedToType={modalParentRelatedToType}
+        relationData={modalRelationData}
+        loadMappingData={loadMappingData}
+      />
+      <MappingForkModal
+        api={api}
+        modalTitle={modalTitle}
+        modalDescription={modalDescription}
+        setModalShowState={setForkModalShowState}
+        modalShowState={forkModalShowState}
+        workItemType={modalWorkItemType}
+        parentType={modalParentType}
+        //parentRelatedToType={modalParentRelatedToType}
+        relationData={modalRelationData}
+        loadMappingData={loadMappingData}
+      />
+      <TestResultsModal
+        api={api}
+        setModalShowState={setTestResultsModalShowState}
+        modalShowState={testResultsModalShowState}
+        testResultDetailsModalShowState={testResultDetailsModalShowState}
+        setTestResultDetailsModalShowState={setTestResultDetailsModalShowState}
+        setTestResultsModalShowState={setTestResultsModalShowState}
+        currentTestResult={currentTestResult}
+        setCurrentTestResult={setCurrentTestResult}
+        modalRelationData={modalRelationData}
+        parentType={modalParentType}
+      />
+      <TestRunModal
+        api={api}
+        setModalShowState={setTestRunModalShowState}
+        setTestResultsModalShowState={setTestResultsModalShowState}
+        modalShowState={testRunModalShowState}
+        modalRelationData={modalRelationData}
+        parentType={modalParentType}
+      />
+      {implementationModalData && (
+        <TestCaseImplementationModal
+          isOpen={implementationModalShowState}
+          onClose={() => setImplementationModalShowState(false)}
+          api={api}
+          testCase={implementationModalData.testCase}
+          relationTo={implementationModalData.relationTo}
+          relationId={implementationModalData.relationId}
+        />
+      )}
+      <MappingSnippetsModal
+        api={api}
+        modalShowState={snippetsModalShowState}
+        setModalShowState={setSnippetsModalShowState}
+        workItemGroup={snippetsModalWorkItem}
+        workItemType={snippetsModalWorkItemType}
+        loadMappingData={loadMappingData}
+      />
+      <APIExportSPDXModal
+        api={api}
+        SPDXContent={SPDXContent}
+        SPDXFilename={exportFilename.current}
+        setSPDXContent={setSPDXContent}
+        modalShowState={modalSPDXExportShowState}
+        setModalShowState={setModalSPDXExportShowState}
+      />
+      <APIExportHTMLModal
+        api={api}
+        mappingView={mappingViewSelectValue}
+        HTMLContent={HTMLContent}
+        HTMLFilename={exportFilename.current}
+        setHTMLContent={setHTMLContent}
+        modalShowState={modalHTMLExportShowState}
+        setModalShowState={setModalHTMLExportShowState}
+        exportToHTMLFormat={exportToFormat}
+      />
+    </React.Fragment>
+  )
+}
+
+export { MappingPageSection }

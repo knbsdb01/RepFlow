@@ -1,0 +1,22 @@
+app_url: http://localhost:9000
+smtp:
+  from: "BASIL - The FuSa Spice"
+  host: ""
+  password: ""
+  port: 0
+  user: ""
+  ssl: true
+  reply_to: ""
+ai:
+  host: ""
+  port: 0
+  model: ""
+  temperature: 0
+  token: ""
+actions:
+  api:
+  sw_requirement:
+  test_specification:
+  test_case:
+  justification:
+  document:

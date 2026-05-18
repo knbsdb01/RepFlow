@@ -1,0 +1,127 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.0] - 2026-04-11
+
+### Added
+- **Cursor IDE integration** (`hedwig-cg cursor install/uninstall`): Creates `.cursor/rules/hedwig-cg.mdc` with alwaysApply rules
+- **Windsurf IDE integration** (`hedwig-cg windsurf install/uninstall`): Creates `.windsurf/rules/hedwig-cg.md` for Cascade
+- **Cline (VS Code extension) integration** as 8th supported AI agent
+- **`hedwig-cg doctor` command**: 21-point installation health check (Python version, deps, tree-sitter parsers, MCP, embedding models, DB integrity, FAISS indexes)
+- **MCP tool descriptions optimized for AI agents**: `search` marked as PRIMARY tool, `communities` marked as "rarely needed", `instructions` guide agents to start with search
+- **AI Agent Interface Design Principle** documented in CLAUDE.md: minimal interface philosophy to prevent hallucination
+- **Weighted Reciprocal Rank Fusion**: Per-signal weights (code_vec=1.0, text_vec=1.0, graph=0.8, keyword=1.5, community=0.7) tuned for optimal search quality
+- **Stopword filtering**: 80+ common English stopwords removed from keyword/community search terms for improved FTS5 precision
+- **LRU search result cache** (128 entries): Instant return for repeated queries, auto-cleared on graph rebuild
+- **Query embedding LRU cache** (256 entries): Eliminates re-encoding for identical queries (291ms → 0ms)
+- `extract_search_terms()` public API for reusable stopword-filtered term extraction
+- `clear_search_cache()` and `clear_query_cache()` public APIs
+- `weights` parameter on `hybrid_search()` for runtime signal weight tuning
+- **Weight-aware graph expansion**: BFS traversal now uses edge weights (semantic similarity + confidence + proximity) and relation-type weights (`calls`/`inherits`=1.0, `imports`=0.7, `defines`=0.5, `contains`=0.3) instead of uniform hop distance
+- `RELATION_WEIGHTS` dictionary for configurable per-relation expansion priority
+- **Parent class context in embeddings**: Method/constructor/property nodes now include "method of ClassName" in embedding text for better class-membership queries
+- **Query-relevant snippets**: Search results now show the most query-term-dense region of source code instead of blind truncation from the start
+- **MCP Server** (`hedwig-cg mcp`): Model Context Protocol server exposing 5 tools (search, node, stats, communities, build) over stdio transport for universal AI agent integration
+- **Search signal explainability**: Each result now includes per-signal RRF contribution breakdown (code_vector, text_vector, graph, keyword, community) in CLI table and MCP output
+- **JS/TS call graph extraction**: Tree-sitter now extracts function/method calls in JavaScript and TypeScript (previously only Python had call tracking), with JS builtin filtering
+- **Pipeline stage timing**: Build command now displays per-stage wall-clock timing breakdown (detect, extract, build, pagerank, embed, cluster, analyze, store) with total elapsed time
+- **Incremental embedding**: `--incremental` builds now skip re-embedding unchanged nodes by checking existing embeddings in DB, reducing rebuild time by up to 95% (8.7s → 0.4s when no files changed)
+- **Fast search mode**: `--fast` flag uses text model only, skipping code model loading for lower cold-start latency; available in CLI, REPL, and MCP server
+- **REPL model preloading**: `hedwig-cg query` REPL now preloads embedding models in a background thread so first search is faster
+- **Python decorator extraction**: Decorators (`@dataclass`, `@cli.command()`, `@staticmethod`, etc.) are now extracted and stored as node attributes, enriching embeddings for decorator-aware search
+- **Search result line numbers**: Results now include `start_line`/`end_line` in CLI (`file.py:42`), MCP server (`file.py:42-67`), and SearchResult API — enabling AI agents to navigate directly to code
+
+### Changed
+- README updated with real benchmarks (9.5s full build, 0.4s incremental, 0.08s warm search), new features (fast search, line numbers, decorator extraction, incremental embedding), and revised optimizations list
+- FAISS index loading now uses `IO_FLAG_MMAP` for lower RSS and faster cold starts on large indices (with automatic fallback)
+- Pipeline automatically clears search result and query embedding caches after rebuild
+- RRF keyword weight boosted from 1.0 → 1.5 so exact-match code entities rank higher
+- Graph expansion seeds increased from top-5 to top-8 for broader graph signal coverage
+
+### Fixed
+- **CI failure**: Added `mcp>=1.0` to dev dependencies and `pytest.importorskip("mcp")` guard for graceful skip
+- **MCP stats tool**: Fixed `compute_god_nodes` (non-existent) → `analyze()` from analyze module returning `AnalysisResult.god_nodes`
+- **Fast mode variable shadowing**: `code_vector_hits` was incorrectly overwritten with text-model results
+
+### Performance
+- Search performance improved ~46% (5.9s → 3.2s) via FAISS disk persistence and graph expansion caching
+- Query embedding cache hit: 291ms → 0ms (3M+ speedup for repeated queries)
+- FAISS mmap loading reduces memory footprint for large indices
+- Warm search: 0.02s, cached search: 0.006s (986 nodes / 2091 edges)
+
+## [0.1.2] - 2026-04-11
+
+### Added
+- **Chinese (简体中文) README** (`docs/README_zh.md`)
+- **German (Deutsch) README** (`docs/README_de.md`)
+- Cross-language navigation links across all 5 README variants (en, ko, ja, zh, de)
+
+### Fixed
+- Correct HybridRAG signal count from "6-signal" to "5-signal" across all documentation, code comments, and CLAUDE.md (actual RRF receives 5 ranked lists: code vector, text vector, graph, keyword, community)
+- Clarify `hedwig-cg search` as the single primary HybridRAG entry point in skill rules and PreToolUse hook
+
+## [Unreleased]
+
+### Added
+- **Community-aware HybridRAG**: 5-signal search (code vector + text vector + graph + keyword + community)
+- **Community summaries**: Auto-generated keyword-rich text from node labels, kinds, docstrings, and file paths
+- **`hedwig-cg communities` CLI command**: List, filter by level, and search communities
+- **Markdown document extraction**: Headings become section nodes with hierarchy, internal links become reference edges
+- **Incremental build** (`--incremental`): SHA-256 content hashing skips unchanged files for fast rebuilds
+- **Embedding download UX**: Rich console message on first model download (~80MB)
+- `community_search()` method in KnowledgeStore for summary-based community lookup
+- **D3.js export format** (`--format d3`): Force-directed graph JSON with PageRank-based sizing and kind-based grouping
+- **`hedwig-cg visualize` CLI command**: Self-contained interactive HTML visualization with zoom, search, tooltips, and drag
+- **`hedwig-cg clean` CLI command**: Remove .hedwig-cg/ database directory with confirmation prompt
+- **Graph quality metrics in `stats`**: Density, connected components, average clustering coefficient
+- Comprehensive CLI command tests (communities, search, d3 export, visualize, clean)
+- Comprehensive JavaScript tree-sitter extraction tests (17 tests)
+- **`hedwig-cg query` REPL**: Interactive search session with `:node`, `:stats`, `:quit` commands
+- **`--offline` flag for `visualize`**: Inlines D3.js (~280KB) for airgapped/offline environments
+- **TypeScript-specific extraction**: Interfaces (with extends/method signatures), type aliases, enums with member extraction
+- E2E integration tests for full pipeline (build → store → search → incremental → export → clean)
+- TypeScript-specific tree-sitter extraction tests (12 tests)
+- 160 tests with 87% code coverage (up from 61 tests)
+- **PyPI classifiers expansion**: Python 3.10/3.11/3.12, AI/NLP topics, `Typing :: Typed`, OS Independent
+- **GitHub Actions PyPI publish**: Automated deployment on GitHub Release via `pypa/gh-action-pypi-publish`
+
+### Fixed
+- **Critical**: `dependencies` in pyproject.toml was under `[project.urls]` TOML section, causing wheel to declare zero dependencies
+- Resolved all 27 ruff lint errors (import sorting, unused variables, line length)
+- Removed legacy ignore-file backward compatibility reference
+- Removed stale `build_hnsw_index` backward-compat alias from store.py
+- Fixed `try_to_load_from_cache` return value check in embeddings.py (operator precedence bug)
+- **Critical**: Incremental build second run returned empty graph — fixed by merging unchanged files from DB via `nx.compose()`
+
+### Changed
+- Updated CLAUDE.md and Claude Code skill docs with new commands and features
+- Updated CHANGELOG.md to reflect all iterations
+
+## [0.1.0] - 2026-04-11
+
+### Added
+- Core pipeline: detect → extract → build → embed → cluster → analyze → store
+- HybridRAG search engine combining vector similarity, graph traversal, and FTS5 keyword matching with RRF fusion
+- Tree-sitter AST extraction for Python, JavaScript, TypeScript with regex fallback
+- Hierarchical Leiden community detection at multiple resolutions (0.25, 0.5, 1.0, 2.0)
+- Local embeddings via sentence-transformers (nomic-ai/nomic-embed-code)
+- FAISS vector index for cosine similarity search
+- SQLite + FTS5 full-text search with BM25 ranking
+- CLI commands: `build`, `search`, `stats`, `node`, `export`
+- Graph analysis: PageRank, god node detection, hub analysis, quality metrics
+- File detection for 20+ programming languages
+- `.hedwig-cg-ignore` for excluding files from analysis
+- Privacy-first design: 100% local, no cloud services
+- Claude Code skill documentation for AI tool integration
+- Multi-language README (English, Korean, Japanese)
+- GitHub Actions CI (Python 3.10-3.12, Ubuntu + macOS)
+- CONTRIBUTING.md with development guide
+
+[Unreleased]: https://github.com/hedwig-ai/hedwig-code-graph/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hedwig-ai/hedwig-code-graph/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/hedwig-ai/hedwig-code-graph/compare/v0.1.0...v0.1.2
+[0.1.0]: https://github.com/hedwig-ai/hedwig-code-graph/releases/tag/v0.1.0

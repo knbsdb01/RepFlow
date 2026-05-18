@@ -1,0 +1,45 @@
+repos:
+  - repo: local
+    hooks:
+      - id: flake8
+        name: flake8
+        entry: "uv run flake8 api/ db/"
+        pass_filenames: false
+        always_run: true
+        language: system
+      - id: prettier
+        name: prettier
+        entry: "cd app/src/ && npx prettier . --write --log-level error"
+        pass_filenames: false
+        always_run: true
+        language: system
+      - id: eslint
+        name: eslint
+        entry: "cd app/src/ && npx eslint --quiet ."
+        pass_filenames: false
+        always_run: true
+        language: system
+      - id: documentation
+        name: documentation
+        entry: "sphinx-build -W docs/source docs/build"
+        pass_filenames: false
+        always_run: true
+        language: system
+      - id: tmt
+        name: tmt
+        entry: "uv run tmt lint . --disable-check P005 --disable-check P009"
+        pass_filenames: false
+        always_run: true
+        language: system
+      - id: app_build
+        name: app_build
+        entry: "cd app && npm run build"
+        pass_filenames: false
+        always_run: true
+        language: system
+      - id: versions_check
+        name: version_check
+        entry: "bash -c ./scripts/check_version.sh"
+        pass_filenames: false
+        always_run: true
+        language: system

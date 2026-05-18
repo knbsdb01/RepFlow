@@ -1,0 +1,358 @@
+from datetime import datetime
+from db.models.db_base import Base
+from db.models.user import UserModel
+from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import delete, event, insert, inspect, select
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
+from sqlalchemy.orm import relationship
+from typing import Optional
+
+
+class ApiModel(Base):
+    __tablename__ = "apis"
+    _description = "Software Component"
+    extend_existing = True
+    id: Mapped[int] = mapped_column(Integer(), primary_key=True, autoincrement=True)
+    api: Mapped[str] = mapped_column(String(100))
+    library: Mapped[str] = mapped_column(String(100))
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    default_view: Mapped[Optional[str]] = mapped_column(String(30))
+    checksum: Mapped[Optional[str]] = mapped_column(String(100))
+    library_version: Mapped[str] = mapped_column(String())
+    implementation_file: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    implementation_file_from_row: Mapped[Optional[int]] = mapped_column(Integer(), nullable=True)
+    implementation_file_to_row: Mapped[Optional[int]] = mapped_column(Integer(), nullable=True)
+    raw_specification_url: Mapped[str] = mapped_column(String())
+    tags: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    last_coverage: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_by: Mapped["UserModel"] = relationship("UserModel",
+                                                   foreign_keys="ApiModel.created_by_id")
+    edited_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    edited_by: Mapped["UserModel"] = relationship("UserModel",
+                                                  foreign_keys="ApiModel.edited_by_id")
+    delete_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    edit_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    manage_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    read_denials: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    write_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    write_permission_requests: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def __init__(self, api, library, library_version, raw_specification_url,
+                 category, checksum, implementation_file,
+                 implementation_file_from_row, implementation_file_to_row, tags,
+                 created_by):
+        self.api = api
+        self.library = library
+        self.library_version = library_version
+        self.raw_specification_url = raw_specification_url
+        self.category = category
+        self.checksum = checksum
+        self.implementation_file = implementation_file
+        self.implementation_file_from_row = (
+            implementation_file_from_row if isinstance(implementation_file_from_row, int) else None
+        )
+        self.implementation_file_to_row = (
+            implementation_file_to_row if isinstance(implementation_file_to_row, int) else None
+        )
+        self.tags = tags
+        self.created_by = created_by
+        self.created_by_id = created_by.id
+        self.edited_by = created_by
+        self.edited_by_id = created_by.id
+        self.delete_permissions = f"{[created_by.id]}"
+        self.edit_permissions = f"{[created_by.id]}"
+        self.manage_permissions = f"{[created_by.id]}"
+        self.read_denials = ""
+        self.write_permissions = f"{[created_by.id]}"
+        self.write_permission_requests = ""
+        self.last_coverage = "0"
+        self.created_at = datetime.now()
+        self.updated_at = self.created_at
+
+    def __repr__(self) -> str:
+        return f"Api(id={self.id!r}, " \
+               f"api={self.api!r}, " \
+               f"library={self.library!r}, " \
+               f"library_version={self.library_version!r}, " \
+               f"raw_specification_url={self.raw_specification_url!r}, " \
+               f"category={self.category!r}, " \
+               f"checksum={self.checksum!r}, " \
+               f"default_view={self.default_view!r}, " \
+               f"implementation_file={self.implementation_file!r}, " \
+               f"implementation_file_from_row={self.implementation_file_from_row!r}, " \
+               f"implementation_file_to_row={self.implementation_file_to_row!r}," \
+               f"created_by={self.created_by.username!r}," \
+               f"edited_by={self.edited_by.username!r}," \
+               f"last_coverage={self.last_coverage!r}," \
+               f"tags={self.tags!r})"
+
+    def current_version(self, db_session):
+        last_item = db_session.query(ApiHistoryModel).filter(
+            ApiHistoryModel.id == self.id).order_by(
+            ApiHistoryModel.version.desc()).limit(1).all()[0]
+
+        return f'{last_item.version}'
+
+    def as_dict(self, full_data=False, db_session=None):
+        _dict = {"id": self.id,
+                 "api": self.api,
+                 "library": self.library,
+                 "library_version": self.library_version,
+                 "raw_specification_url": self.raw_specification_url,
+                 "category": self.category,
+                 "checksum": self.checksum,
+                 "default_view": self.default_view,
+                 "implementation_file": self.implementation_file,
+                 "implementation_file_from_row": self.implementation_file_from_row,
+                 "implementation_file_to_row": self.implementation_file_to_row,
+                 "created_by": self.created_by.username,
+                 "edited_by": self.edited_by.username,
+                 "last_coverage": self.last_coverage,
+                 "tags": self.tags}
+
+        if db_session is not None:
+            from db.models.api_sw_requirement import ApiSwRequirementModel
+            from db.models.api_test_specification import ApiTestSpecificationModel
+            from db.models.api_test_case import ApiTestCaseModel
+
+            _dict['version'] = self.current_version(db_session)
+            # Calc coverage
+            srs_query = db_session.query(ApiSwRequirementModel).filter(
+                ApiSwRequirementModel.api_id == self.id
+            )
+            srs = srs_query.all()
+            srs_cov = sum([x.get_waterfall_coverage(db_session) for x in srs])
+
+            tss_query = db_session.query(ApiTestSpecificationModel).filter(
+                ApiTestSpecificationModel.api_id == self.id
+            )
+            tss = tss_query.all()
+            tss_cov = sum([x.get_waterfall_coverage(db_session) for x in tss])
+
+            tcs_query = db_session.query(ApiTestCaseModel).filter(
+                ApiTestCaseModel.api_id == self.id
+            )
+            tcs = tcs_query.all()
+            tcs_cov = sum([x.as_dict()['coverage'] for x in tcs])
+
+            _dict['srs_coverage'] = srs_cov
+            _dict['tss_coverage'] = tss_cov
+            _dict['tcs_coverage'] = tcs_cov
+
+        if full_data:
+            _dict["created_at"] = self.created_at.strftime(Base.dt_format_str)
+            _dict["updated_at"] = self.updated_at.strftime(Base.dt_format_str)
+        return _dict
+
+    def to_html(self, exported_on: str = "", exported_by: str = ""):
+        import html as _h
+        lib = _h.escape(str(self.library))
+        api_name = _h.escape(str(self.api))
+        lib_ver = _h.escape(str(self.library_version))
+        ref_url = _h.escape(str(self.raw_specification_url))
+
+        html = f"<div id='api-{self.id}' style='margin-bottom:24px;'>"
+        html += (
+            "<div style='background:#f0f4f8;padding:24px 20px;border-radius:4px;"
+            "border-left:4px solid #0066cc;'>"
+        )
+        html += f"<h1 style='margin:0 0 16px;'>{lib} - {api_name}</h1>"
+        html += "<table style='border-collapse:collapse;width:100%;'>"
+        html += (
+            f"<tr><td style='padding:6px 10px;white-space:nowrap;width:1%;"
+            f"color:#6a6e73;font-weight:600;'>Library version</td>"
+            f"<td style='padding:6px 10px;'>{lib_ver}</td></tr>"
+        )
+        if exported_on:
+            html += (
+                f"<tr><td style='padding:6px 10px;white-space:nowrap;width:1%;"
+                f"color:#6a6e73;font-weight:600;'>Exported on</td>"
+                f"<td style='padding:6px 10px;'>{_h.escape(exported_on)}</td></tr>"
+            )
+        if exported_by:
+            html += (
+                f"<tr><td style='padding:6px 10px;white-space:nowrap;width:1%;"
+                f"color:#6a6e73;font-weight:600;'>Exported by</td>"
+                f"<td style='padding:6px 10px;'>{_h.escape(exported_by)}</td></tr>"
+            )
+        html += (
+            f"<tr><td style='padding:6px 10px;white-space:nowrap;width:1%;"
+            f"color:#6a6e73;font-weight:600;'>Reference document</td>"
+            f"<td style='padding:6px 10px;word-break:break-all;'>{ref_url}</td></tr>"
+        )
+        html += "</table>"
+        html += "</div></div>"
+        html += "<div style='page-break-after:always;break-after:page;'></div>"
+        return html
+
+
+@event.listens_for(ApiModel, "after_update")
+def receive_after_update(mapper, connection, target):
+    # Avoid to update the version if the only change is related to last_coverage
+    state = inspect(target)
+    changes = {}
+    for attr in state.attrs:
+        hist = state.get_history(attr.key, True)
+        old_value = hist.deleted[0] if hist.deleted else None
+        new_value = hist.added[0] if hist.added else None
+        if old_value is not None or new_value is not None:
+            if old_value != new_value:
+                changes[attr.key] = [old_value, new_value]
+        affected_fields = list(changes.keys())
+        if len(affected_fields) == 1:
+            if affected_fields[0] == 'last_coverage':
+                return
+
+    last_query = select(ApiHistoryModel.version).where(ApiHistoryModel.id ==
+                                                       target.id).order_by(ApiHistoryModel.version.desc()).limit(1)
+    version = -1
+    for row in connection.execute(last_query):
+        version = row[0]
+
+    if version > -1:
+        insert_query = insert(ApiHistoryModel).values(
+            id=target.id,
+            api=target.api,
+            library=target.library,
+            library_version=target.library_version,
+            raw_specification_url=target.raw_specification_url,
+            category=target.category,
+            checksum=target.checksum,
+            default_view=target.default_view,
+            implementation_file=target.implementation_file,
+            implementation_file_from_row=target.implementation_file_from_row,
+            implementation_file_to_row=target.implementation_file_to_row,
+            tags=target.tags,
+            created_by_id=target.created_by_id,
+            edited_by_id=target.edited_by_id,
+            delete_permissions=target.delete_permissions,
+            edit_permissions=target.edit_permissions,
+            manage_permissions=target.manage_permissions,
+            read_denials=target.read_denials,
+            write_permissions=target.write_permissions,
+            write_permission_requests=target.write_permission_requests,
+            version=version + 1
+        )
+        connection.execute(insert_query)
+
+
+@event.listens_for(ApiModel, "after_insert")
+def receive_after_insert(mapper, connection, target):
+    insert_query = insert(ApiHistoryModel).values(
+        id=target.id,
+        api=target.api,
+        library=target.library,
+        library_version=target.library_version,
+        raw_specification_url=target.raw_specification_url,
+        category=target.category,
+        checksum=target.checksum,
+        default_view=target.default_view,
+        implementation_file=target.implementation_file,
+        implementation_file_from_row=target.implementation_file_from_row,
+        implementation_file_to_row=target.implementation_file_to_row,
+        tags=target.tags,
+        created_by_id=target.created_by_id,
+        edited_by_id=target.edited_by_id,
+        delete_permissions=target.delete_permissions,
+        edit_permissions=target.edit_permissions,
+        manage_permissions=target.manage_permissions,
+        read_denials=target.read_denials,
+        write_permissions=target.write_permissions,
+        write_permission_requests=target.write_permission_requests,
+        version=1
+    )
+    connection.execute(insert_query)
+
+
+@event.listens_for(ApiModel, "before_delete")
+def receive_before_delete(mapper, connection, target):
+    # Purge history rows for this mapping id
+    del_stmt = delete(ApiHistoryModel).where(ApiHistoryModel.id == target.id)
+    connection.execute(del_stmt)
+
+
+class ApiHistoryModel(Base):
+    __tablename__ = "apis_history"
+    extend_existing = True
+    row_id: Mapped[int] = mapped_column(Integer(), primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer())
+    api: Mapped[str] = mapped_column(String(100))
+    library: Mapped[str] = mapped_column(String(100))
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    checksum: Mapped[Optional[str]] = mapped_column(String(100))
+    default_view: Mapped[Optional[str]] = mapped_column(String(30))
+    library_version: Mapped[str] = mapped_column(String())
+    implementation_file: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    implementation_file_from_row: Mapped[Optional[int]] = mapped_column(Integer(), nullable=True)
+    implementation_file_to_row: Mapped[Optional[int]] = mapped_column(Integer(), nullable=True)
+    raw_specification_url: Mapped[str] = mapped_column(String())
+    tags: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_by: Mapped["UserModel"] = relationship("UserModel",
+                                                   foreign_keys="ApiHistoryModel.created_by_id")
+    edited_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    edited_by: Mapped["UserModel"] = relationship("UserModel",
+                                                  foreign_keys="ApiHistoryModel.edited_by_id")
+    delete_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    edit_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    manage_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    read_denials: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    write_permissions: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    write_permission_requests: Mapped[Optional[str]] = mapped_column(String(), nullable=True)
+    version: Mapped[int] = mapped_column(Integer())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def __init__(self, id, api, library, library_version, raw_specification_url,
+                 category, checksum, default_view, implementation_file,
+                 implementation_file_from_row, implementation_file_to_row, tags,
+                 created_by_id, edited_by_id, delete_permissions, edit_permissions,
+                 manage_permissions, read_denials, write_permissions, write_permission_requests, version):
+        self.id = id
+        self.api = api
+        self.library = library
+        self.library_version = library_version
+        self.raw_specification_url = raw_specification_url
+        self.category = category
+        self.checksum = checksum
+        self.default_view = default_view
+        self.implementation_file = implementation_file
+        self.implementation_file_from_row = (
+            implementation_file_from_row if isinstance(implementation_file_from_row, int) else None
+        )
+        self.implementation_file_to_row = (
+            implementation_file_to_row if isinstance(implementation_file_to_row, int) else None
+        )
+        self.tags = tags
+        self.created_by_id = created_by_id
+        self.edited_by_id = edited_by_id
+        self.delete_permissions = delete_permissions
+        self.edit_permissions = edit_permissions
+        self.manage_permissions = manage_permissions
+        self.read_denials = read_denials
+        self.write_permissions = write_permissions
+        self.write_permission_requests = write_permission_requests
+        self.version = version
+        self.created_at = datetime.now()
+        self.updated_at = self.created_at
+
+    def __repr__(self) -> str:
+        return f"ApiHistory(id={self.id!r}, " \
+               f"api={self.api!r}, " \
+               f"library={self.library!r}, " \
+               f"library_version={self.library_version!r}, " \
+               f"raw_specification_url={self.raw_specification_url!r}, " \
+               f"category={self.category!r}, " \
+               f"checksum={self.checksum!r}, " \
+               f"default_view={self.default_view!r}, " \
+               f"implementation_file={self.implementation_file!r}, " \
+               f"implementation_file_from_row={self.implementation_file_from_row!r}, " \
+               f"implementation_file_to_row={self.implementation_file_to_row!r}," \
+               f"edited_by_id={self.edited_by_id!r}, " \
+               f"tags={self.tags!r}, " \
+               f"version={self.version!r})"

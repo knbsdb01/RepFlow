@@ -1,0 +1,133 @@
+import React from 'react'
+import * as Constants from '../../Constants/constants'
+import { Dropdown, DropdownItem, DropdownList, MenuToggle, MenuToggleElement } from '@patternfly/react-core'
+import EllipsisVIcon from '@patternfly/react-icons/dist/esm/icons/ellipsis-v-icon'
+import { ActionButtons } from '@app/Common/Actions/ActionButtons'
+import { useAuth } from '@app/User/AuthProvider'
+
+export interface JustificationMenuKebabProps {
+  setJModalInfo
+  setForkModalInfo
+  setCommentModalInfo
+  setHistoryModalInfo
+  setDetailsModalInfo
+  setUsageModalInfo
+  setDeleteModalInfo
+  api
+  mappingIndex
+  mappingList
+  mappingSection
+  mappingOffset
+}
+
+export const JustificationMenuKebab: React.FunctionComponent<JustificationMenuKebabProps> = ({
+  setJModalInfo,
+  setForkModalInfo,
+  setCommentModalInfo,
+  setHistoryModalInfo,
+  setDetailsModalInfo,
+  setUsageModalInfo,
+  setDeleteModalInfo,
+  api,
+  mappingIndex,
+  mappingList,
+  mappingSection,
+  mappingOffset
+}: JustificationMenuKebabProps) => {
+  const [isOpen, setIsOpen] = React.useState(false)
+  const auth = useAuth()
+
+  const onToggleClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setIsOpen(!isOpen)
+  }
+
+  const onSelect = (_e?: React.MouseEvent) => {
+    _e?.stopPropagation()
+    setIsOpen(false)
+  }
+
+  return (
+    <Dropdown
+      isOpen={isOpen}
+      onSelect={onSelect}
+      onOpenChange={(isOpen: boolean) => setIsOpen(isOpen)}
+      toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
+        <MenuToggle ref={toggleRef} aria-label='kebab dropdown toggle' variant='plain' onClick={onToggleClick} isExpanded={isOpen}>
+          <EllipsisVIcon />
+        </MenuToggle>
+      )}
+      shouldFocusToggleOnSelect
+    >
+      <DropdownList>
+        {auth.isLogged() && Constants.hasWritePermission(api) ? (
+          <React.Fragment>
+            <DropdownItem
+              value={0}
+              id={'btn-menu-justification-delete-' + mappingList[mappingIndex].relation_id}
+              key='delete'
+              className='danger-text'
+              onClick={() => setDeleteModalInfo(true, Constants._J, 'api', '', mappingList, mappingIndex)}
+            >
+              Delete
+            </DropdownItem>
+            <DropdownItem
+              value={1}
+              id={'btn-menu-justification-edit-' + mappingList[mappingIndex].relation_id}
+              key='edit'
+              onClick={() => setJModalInfo(true, 'edit', api, mappingSection, mappingOffset, mappingList, mappingIndex)}
+            >
+              Edit
+            </DropdownItem>
+            <DropdownItem
+              value={2}
+              id={'btn-menu-justification-fork-' + mappingList[mappingIndex].relation_id}
+              name={'btn-menu-justification-fork'}
+              key='fork'
+              onClick={() => setForkModalInfo(true, Constants._J, Constants._A, '', mappingList, mappingIndex)}
+            >
+              Fork
+            </DropdownItem>
+          </React.Fragment>
+        ) : (
+          ''
+        )}
+
+        <DropdownItem
+          value={3}
+          id={'btn-menu-justification-history-' + mappingList[mappingIndex].relation_id}
+          key='history'
+          onClick={() => setHistoryModalInfo(true, Constants._J, Constants._A, mappingList[mappingIndex].relation_id)}
+        >
+          History
+        </DropdownItem>
+        <DropdownItem
+          value={4}
+          id={'btn-menu-justification-details-' + mappingList[mappingIndex].relation_id}
+          key='show-details'
+          onClick={() => setDetailsModalInfo(true, Constants._J, mappingList[mappingIndex][Constants._J]['id'])}
+        >
+          Show Details
+        </DropdownItem>
+        <DropdownItem
+          value={5}
+          id={'btn-menu-justification-comments-' + mappingList[mappingIndex].relation_id}
+          key='comments'
+          onClick={() => setCommentModalInfo(true, Constants._J, Constants._A, '', mappingList, mappingIndex)}
+        >
+          Comments
+        </DropdownItem>
+        <DropdownItem
+          value={6}
+          id={'btn-menu-justification-usage-' + mappingList[mappingIndex].relation_id}
+          key='usage'
+          onClick={() => setUsageModalInfo(true, Constants._J, mappingList[mappingIndex][Constants._J]['id'])}
+        >
+          Usage
+        </DropdownItem>
+
+        <ActionButtons workItemType={Constants._J} />
+      </DropdownList>
+    </Dropdown>
+  )
+}

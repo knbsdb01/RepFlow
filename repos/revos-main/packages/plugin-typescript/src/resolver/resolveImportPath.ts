@@ -1,4 +1,4 @@
-import fs from "fs";
+git branch -M mainimport fs from "fs";
 import path from "path";
 
 type TsConfig = {

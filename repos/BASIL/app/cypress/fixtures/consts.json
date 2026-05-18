@@ -1,0 +1,106 @@
+{
+  "app_base_url": "http://localhost:9056",
+  "api_base_url": "http://localhost:5005",
+  "api_base_path": "/BASIL-API",
+  "login": {
+    "input_username": "#pf-login-username-id",
+    "input_password": "#pf-login-password-id"
+  },
+  "api": {
+    "modal_button_confirm_id": "#btn-modal-api-confirm",
+    "table_listing_id": "#table-api-listing",
+    "input_search_id": "#input-api-list-search"
+  },
+  "import": {
+    "test_cases": {
+      "repository": "https://github.com/elisa-tech/BASIL.git",
+      "branch": "main",
+      "test_case": {
+        "name": "/examples/tmt/local/tmt-dummy-test",
+        "title": "Dummy passing test"
+      }
+    },
+    "sw_requirements": {
+      "basil_spdx": {
+        "file": "../examples/export/spdx.jsonld",
+        "sw_requirement": {
+          "title": "Example Requirement one"
+        }
+      },
+      "csv": {
+        "file": "../examples/import/reqs/reqs.csv",
+        "sw_requirement": {
+          "title": "Requirement One"
+        }
+      },
+      "json": {
+        "file": "../examples/import/reqs/reqs.json",
+        "sw_requirement": {
+          "title": "Requirement Two"
+        }
+      },
+      "strictdoc": {
+        "file": "../examples/import/reqs/strictdoc-output.spdx.jsonld",
+        "sw_requirement": {
+          "title": "Requirements management"
+        }
+      },
+      "yaml": {
+        "file": "../examples/import/reqs/reqs.yaml",
+        "sw_requirement": {
+          "title": "Requirement Four"
+        }
+      },
+      "xlsx": {
+        "file": "../examples/import/reqs/reqs.xlsx",
+        "sw_requirement": {
+          "title": "req5"
+        }
+      }
+    }
+  },
+  "mapping": {
+    "select_view_id": "#select-mapping-view",
+    "table_matching_id": "#table-matching-sections",
+    "table_unmatching_id": "#table-unmatching-sections"
+  },
+  "test_run": {
+    "modal_id": "[aria-label='test run modal']",
+    "form_id": "#tabContentTestRunForm",
+    "form_submit_button_id": "#btn-test-run-add-submit",
+    "form_cancel_button_id": "#btn-test-run-add-cancel",
+    "results_modal_id": "[aria-label='test result modal']",
+    "details_modal_id": "[aria-label='test result details modal']",
+    "results_table_id": "table[aria-label='BASIL Test Results Table']",
+    "run_button_id": "button:contains('Run')",
+    "results_button_text": "Test Results",
+    "details_button_text": "Details"
+  },
+  "users": {
+    "admin": {
+      "username": "admin",
+      "password": "dummy_password",
+      "role": "ADMIN"
+    }
+  },
+  "work_item_types": {
+    "test-case": {
+      "mapping-label": "Test Case"
+    },
+    "test-specification": {
+      "mapping-label": "Test Specification"
+    },
+    "sw-requirement": {
+      "mapping-label": "Software Requirement"
+    },
+    "justification": {
+      "mapping-label": "Justification"
+    },
+    "document": {
+      "mapping-label": "Document"
+    }
+  },
+  "long_wait": 3000,
+  "mid_wait": 1500,
+  "fast_wait": 750
+}

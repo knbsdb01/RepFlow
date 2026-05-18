@@ -1,0 +1,12226 @@
+import copy
+from import_manager import ImportSwRequirements
+from spdx_manager import SPDXManager
+from notifier import EmailNotifier
+from ai import AIPrompter
+from db.models.user import UserModel
+from db.models.test_specification_test_case import (
+    TestSpecificationTestCaseHistoryModel,
+    TestSpecificationTestCaseModel,
+)
+from db.models.test_specification import TestSpecificationHistoryModel, TestSpecificationModel
+from db.models.test_run_config import TestRunConfigModel
+from db.models.test_run import TestRunModel
+from db.models.test_case import TestCaseHistoryModel, TestCaseModel
+from db.models.sw_requirement_test_specification import (
+    SwRequirementTestSpecificationHistoryModel,
+    SwRequirementTestSpecificationModel,
+)
+from db.models.sw_requirement_test_case import SwRequirementTestCaseHistoryModel, SwRequirementTestCaseModel
+from db.models.sw_requirement_sw_requirement import (
+    SwRequirementSwRequirementHistoryModel,
+    SwRequirementSwRequirementModel,
+)
+from db.models.sw_requirement import SwRequirementHistoryModel, SwRequirementModel
+from db.models.ssh_key import SshKeyModel
+from db.models.notification import NotificationModel
+from db.models.justification import JustificationHistoryModel, JustificationModel
+from db.models.document import DocumentHistoryModel, DocumentModel
+from db.models.document_document import DocumentDocumentModel, DocumentDocumentHistoryModel
+from db.models.comment import CommentModel
+from db.models.api_test_specification import ApiTestSpecificationHistoryModel, ApiTestSpecificationModel
+from db.models.api_test_case import ApiTestCaseHistoryModel, ApiTestCaseModel
+from db.models.api_sw_requirement import ApiSwRequirementHistoryModel, ApiSwRequirementModel
+from db.models.api_justification import ApiJustificationHistoryModel, ApiJustificationModel
+from db.models.api_document import ApiDocumentHistoryModel, ApiDocumentModel
+from db.models.api import ApiHistoryModel, ApiModel
+from db import db_orm
+import base64
+import datetime
+import json
+import logging
+import math
+import os
+import re
+import shutil
+import secrets
+import sys
+import subprocess
+import time
+import urllib
+import urllib.request
+import urllib.error
+import yaml
+from uuid import uuid4
+
+import gitlab
+from flask import Flask, g, redirect, request, Response, send_file, send_from_directory
+from flask_cors import CORS
+from flask_restful import Api, Resource, reqparse
+from pyaml_env import parse_config
+from sqlalchemy import String, and_, cast, or_, update
+from sqlalchemy.orm.exc import NoResultFound
+from api_response import (
+    CREATED_STATUS,
+    OK_STATUS,
+    ApiResponse,
+    api_response_decorator,
+)
+from api_utils import (
+    add_html_link_to_email_body,
+    async_email_notification,
+    bool_from_string,
+    BORDER_COLOR_DOCUMENT,
+    BORDER_COLOR_JUSTIFICATION,
+    BORDER_COLOR_SW_REQUIREMENT,
+    BORDER_COLOR_TEST_CASE,
+    BORDER_COLOR_TEST_SPECIFICATION,
+    code_to_html,
+    document_to_html,
+    extend_unmapped_sections_for_auto_fix,
+    get_api_specification,
+    get_custom_actions,
+    get_html_email_body_from_template,
+    get_mapping_comments,
+    get_safe_str,
+    get_user_config_folder_path,
+    get_user_html_folder_path,
+    get_user_pdf_folder_path,
+    get_user_traceability_scanner_config,
+    is_safe_local_user_file_path,
+    is_safe_user_path,
+    is_testing_enabled_by_env,
+    load_settings,
+    parse_int,
+    read_file,
+    justification_to_html,
+    sw_requirement_to_html,
+    test_specification_to_html,
+    test_case_to_html,
+    test_run_config_to_html,
+    test_run_to_html,
+    tools_to_html,
+)
+from pdf_converter import ConvertRequest, convert_to_pdf
+from testrun import TestRunner
+import db.models.init_db as init_db
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s in %(funcName)s: %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+logger.info("Starting API")
+
+currentdir = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(1, os.path.dirname(currentdir))
+
+CONFIGS_FOLDER = "configs"
+JOIN_APIS_TABLE = "apis"
+JOIN_SW_REQUIREMENTS_TABLE = "sw-requirements"
+JOIN_TEST_SPECIFICATIONS_TABLE = "test-specifications"
+MAX_LOGIN_ATTEMPTS = 5
+MAX_LOGIN_ATTEMPTS_TIMEOUT = 60 * 5  # 5 minutes
+SSH_KEYS_PATH = os.path.join(currentdir, "ssh_keys")
+TESTRUN_PRESET_FILEPATH = os.path.join(currentdir, CONFIGS_FOLDER, "testrun_plugin_presets.yaml")
+SETTINGS_FILEPATH = os.path.join(currentdir, CONFIGS_FOLDER, "settings.yaml")
+EMAIL_TEMPLATE_PATH = os.path.join(currentdir, CONFIGS_FOLDER, "email_template.html")
+EMAIL_DISCORD_FOOTER_MESSAGE = "<p>Join our <a href='" \
+    "https://discord.gg/2sCQSTZHTW" \
+    "'>BASIL Discord channel</a> to discuss about the tool usage and development!</p>"
+TEST_RUNS_BASE_DIR = os.getenv("TEST_RUNS_BASE_DIR", "/var/test-runs")
+USER_FILES_BASE_DIR = os.path.join(currentdir, "user-files")  # forced under api to ensure tmt tree validity
+PYPROJECT_FILEPATH = os.path.join(os.path.dirname(currentdir), "pyproject.toml")
+HISTORY_DATE_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+HTML_EXPORT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+SETTINGS_CACHE, SETTINGS_LAST_MODIFIED = load_settings(None, None)
+
+if not os.path.exists(SSH_KEYS_PATH):
+    os.makedirs(SSH_KEYS_PATH, exist_ok=True)
+
+if not os.path.exists(TEST_RUNS_BASE_DIR):
+    logger.info(f"Creating TEST_RUNS_BASE_DIR: {TEST_RUNS_BASE_DIR}")
+    os.makedirs(TEST_RUNS_BASE_DIR, exist_ok=True)
+
+if not os.path.exists(USER_FILES_BASE_DIR):
+    os.makedirs(USER_FILES_BASE_DIR, exist_ok=True)
+
+
+# Read API Version once
+# API Version is not supposed to change runtime
+API_VERSION = ""
+if os.path.exists(PYPROJECT_FILEPATH):
+    pyproject_content = read_file(PYPROJECT_FILEPATH)
+    if pyproject_content:
+        version_row = [x for x in pyproject_content.split("\n") if x.startswith("version = ")]
+        if version_row:
+            API_VERSION = version_row[0].split("=")[-1].replace('"', "").strip()
+
+USER_ROLES_DELETE_PERMISSIONS = ["ADMIN", "USER"]
+USER_ROLES_EDIT_PERMISSIONS = ["ADMIN", "USER"]
+USER_ROLES_WRITE_PERMISSIONS = ["ADMIN", "USER"]
+USER_ROLES_MANAGE_PERMISSIONS = ["ADMIN", "USER"]
+USER_ROLES_MANAGE_USERS = [
+    "ADMIN",
+]
+
+NOTIFICATION_CATEGORY_NEW = "success"
+NOTIFICATION_CATEGORY_EDIT = "warning"
+NOTIFICATION_CATEGORY_DELETE = "danger"
+
+API_PERMISSION_FIELDS = [
+    "delete_permissions",
+    "edit_permissions",
+    "manage_permissions",
+    "read_denials",
+    "write_permissions",
+]
+
+# Export configuration fields
+EXP_CONF_INCLUDE_JUSTIFICATIONS = "include_justifications"
+EXP_CONF_INCLUDE_DOCUMENTS = "include_documents"
+EXP_CONF_INCLUDE_TEST_SPECIFICATIONS = "include_test_specifications"
+EXP_CONF_INCLUDE_TEST_CASES = "include_test_cases"
+EXP_CONF_INCLUDE_TEST_RUNS = "include_test_runs"
+EXP_CONF_INCLUDE_COMMENTS = "include_comments"
+EXP_CONF_INCLUDE_TOOLS = "include_tools"
+
+app = Flask("BASIL-API")
+api = Api(app)
+CORS(app)
+
+if not app.config.get("TESTING", False):
+    if app.config.get("ENV", "") != "local":
+        app.config["TESTING"] = is_testing_enabled_by_env()
+
+if app.config.get("TESTING", False):
+    logger.info(" * TESTING ON")
+    app.config["DB"] = "test"
+else:
+    logger.info(" * TESTING OFF")
+    app.config["DB"] = "basil"
+
+init_db.initialization(app.config["DB"])
+
+login_attempt_cache = {}
+
+token_parser = reqparse.RequestParser()
+token_parser.add_argument("token", location="form")
+
+_A = "api"
+_As = f"{_A}s"
+_SR = "sw_requirement"
+_SRs = f"{_SR}s"
+_TS = "test_specification"
+_TSs = f"{_TS}s"
+_TC = "test_case"
+_TCs = f"{_TC}s"
+_J = "justification"
+_Js = f"{_J}s"
+_D = "document"
+_Ds = f"{_D}s"
+_ALL_WORK_ITEMS_TYPES = [_SR, _TS, _TC, _J, _D]
+
+
+def get_db_name():
+    db = app.config.get("DB", "")
+    if db:
+        return db
+    return "basil"
+
+
+def get_db():
+    if 'db' not in g:
+        g.db = db_orm.DbInterface(get_db_name())
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exception=None):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
+
+def get_updated_settings():
+    """Update global variables SETTINGS_CACHE and SETTINGS_LAST_MODIFIED
+    and return SETTINGS_CACHE"""
+    global SETTINGS_CACHE, SETTINGS_LAST_MODIFIED
+    SETTINGS_CACHE, SETTINGS_LAST_MODIFIED = load_settings(settings_cache=SETTINGS_CACHE,
+                                                           settings_last_modified=SETTINGS_LAST_MODIFIED)
+    return SETTINGS_CACHE
+
+
+def get_api_from_request(_request, _db_session):
+    if "api-id" not in _request.keys():
+        return None
+
+    query = _db_session.query(ApiModel).filter(ApiModel.id == _request["api-id"])
+
+    try:
+        api = query.one()
+        return api
+    except NoResultFound:
+        return None
+
+
+def get_api_from_indirect_document_mapping(_mapping, _dbisession):
+    """Return the ApiModel instance from an indirect mapping to
+    Document
+    Possible nested mappings are:
+    - DocumentDocumentModel
+    - TODO: DocumentTestCaseModel
+    """
+    doc_mapping_api_id = get_direct_document_mapping_id(_mapping, _dbisession)
+    if not doc_mapping_api_id:
+        return None
+    try:
+        api_mapping = _dbisession.query(ApiDocumentModel).filter(
+            ApiDocumentModel.id == doc_mapping_api_id).one()
+        return api_mapping.api
+    except NoResultFound:
+        return None
+
+    return None
+
+
+def get_direct_document_mapping_id(_mapping, _dbisession):
+    """Return the ApiDocumentModel.id
+    from an indirect mapping to Document"""
+
+    # Work Items mapped to a Document
+    if isinstance(_mapping, DocumentDocumentModel):
+        parent_model = DocumentDocumentModel
+        parent_mapping_field_id = "document_mapping_document_id"
+        parent_mapping_api_field_id = "document_mapping_api_id"
+    else:
+        logger.warning(f"Mapping is instance of {type(_mapping)}")
+        return None
+
+    api_mapping_id = getattr(_mapping, parent_mapping_api_field_id)
+    parent_mapping_id = getattr(_mapping, parent_mapping_field_id)
+
+    # Indirect mapping
+    if not api_mapping_id:
+        try:
+            parent_mapping = _dbisession.query(parent_model).filter(parent_model.id == parent_mapping_id).one()
+            api_mapping_id = get_direct_document_mapping_id(parent_mapping, _dbisession)
+        except NoResultFound:
+            return None
+
+    # Direct mapping
+    if api_mapping_id:
+        return api_mapping_id
+
+    return None
+
+
+def get_api_from_indirect_sw_requirement_mapping(_mapping, _dbisession):
+    """Return the ApiModel instance from an indirect mapping to
+    SwRequirement
+    Possible nested mappings are:
+    - SwRequirementSwRequirementModel
+    - SwRequirementTestCaseModel
+    - SwRequirementTestSpecificationModel
+    """
+    sr_mapping_api_id = get_direct_sw_requirement_mapping_id(_mapping, _dbisession)
+    if not sr_mapping_api_id:
+        return None
+    try:
+        api_mapping = _dbisession.query(ApiSwRequirementModel).filter(
+            ApiSwRequirementModel.id == sr_mapping_api_id).one()
+        return api_mapping.api
+    except NoResultFound:
+        return None
+
+    return None
+
+
+def get_api_from_indirect_test_specification_mapping(_mapping, _dbisession):
+    """Return the ApiModel instance from an indirect mapping to
+    TestSpecification.
+    Possible nested mappings are:
+    - TestSpecificationTestCaseModel
+    The parent test specification can be mapped to an Api directly
+    (ApiTestSpecificationModel) or indirectly through a SwRequirement.
+    """
+    if not isinstance(_mapping, TestSpecificationTestCaseModel):
+        logger.warning(f"Mapping is instance of {type(_mapping)}")
+        return None
+
+    if _mapping.test_specification_mapping_api_id:
+        try:
+            api_ts = _dbisession.query(ApiTestSpecificationModel).filter(
+                ApiTestSpecificationModel.id == _mapping.test_specification_mapping_api_id
+            ).one()
+            return api_ts.api
+        except NoResultFound:
+            return None
+    elif _mapping.test_specification_mapping_sw_requirement_id:
+        try:
+            sr_ts = _dbisession.query(SwRequirementTestSpecificationModel).filter(
+                SwRequirementTestSpecificationModel.id == _mapping.test_specification_mapping_sw_requirement_id
+            ).one()
+        except NoResultFound:
+            return None
+        return get_api_from_indirect_sw_requirement_mapping(sr_ts, _dbisession)
+
+    return None
+
+
+def get_direct_sw_requirement_mapping_id(_mapping, _dbisession):
+    """Return the ApiSwRequirementModel.id
+    from an indirect mapping to SwRequirement"""
+
+    # Work Items mapped to a Sw Requirement
+    if (
+        isinstance(_mapping, SwRequirementSwRequirementModel)
+        or isinstance(_mapping, SwRequirementTestCaseModel)
+        or isinstance(_mapping, SwRequirementTestSpecificationModel)
+    ):
+        parent_model = SwRequirementSwRequirementModel
+        parent_mapping_field_id = "sw_requirement_mapping_sw_requirement_id"
+        parent_mapping_api_field_id = "sw_requirement_mapping_api_id"
+    else:
+        logger.warning(f"Mapping is instance of {type(_mapping)}")
+        return None
+
+    api_mapping_id = getattr(_mapping, parent_mapping_api_field_id)
+    parent_mapping_id = getattr(_mapping, parent_mapping_field_id)
+
+    # Indirect mapping
+    if not api_mapping_id:
+        try:
+            parent_mapping = _dbisession.query(parent_model).filter(parent_model.id == parent_mapping_id).one()
+            api_mapping_id = get_direct_sw_requirement_mapping_id(parent_mapping, _dbisession)
+        except NoResultFound:
+            return None
+
+    # Direct mapping
+    if api_mapping_id:
+        return api_mapping_id
+
+    return None
+
+
+def get_user_id_from_request(_request, _db_session):
+    user = get_active_user_from_request(_request, _db_session)
+    if isinstance(user, UserModel):
+        user_id = user.id
+    else:
+        user_id = 0
+    return user_id
+
+
+def get_username_from_id(_id, _db_session):
+    try:
+        user = _db_session.query(UserModel).filter(UserModel.id == _id).one()
+        return user.username
+    except NoResultFound:
+        return ""
+
+
+def get_active_user_from_request(_request, _db_session):
+    mandatory_fields = ["user-id", "token"]
+    if not check_fields_in_request(
+        fields=mandatory_fields,
+        request=_request,
+        allow_empty_string=False,
+        int_fields=["user-id"]
+    ):
+        return None
+
+    query = (
+        _db_session.query(UserModel)
+        .filter(UserModel.id == _request["user-id"])
+        .filter(UserModel.token == _request["token"])
+        .filter(UserModel.enabled == 1)
+    )
+
+    try:
+        user = query.one()
+        return user
+    except NoResultFound:
+        return None
+
+
+def get_usernames_from_ids(_ids, _dbi_session):
+    # _ids list format [1][3][34]
+    if not _ids:
+        return []
+    user_ids = _ids.split("][")
+    user_ids = [x.replace("[", "").replace("]", "") for x in user_ids]
+    if not user_ids:
+        return []
+    query = _dbi_session.query(UserModel.username).filter(UserModel.id.in_(user_ids))
+    users = query.all()
+    ret = [x.username for x in users]
+    return ret
+
+
+def get_api_user_permissions(_api, _user, _dbi_session):
+    """Extract user permissions from api
+
+    - guest (without user entry) has id = 0
+    - user with GUEST role doesn't have read permissions in case a read denial is defined
+    - guest (without user entry) or user with GUEST role can only have read permissions
+    - for other roles, Write permission implies Read permission
+    """
+    permissions = ""
+
+    read_denials = get_safe_str(_api.read_denials)
+    write_permissions = get_safe_str(_api.write_permissions)
+    manage_permissions = get_safe_str(_api.manage_permissions)
+    edit_permissions = get_safe_str(_api.edit_permissions)
+
+    if isinstance(_user, UserModel):
+        if _api.created_by_id == _user.id:
+            return "rwem"
+
+        if _user.role == 'GUEST':
+            if read_denials == '':
+                permissions = "r"
+            return permissions
+        else:
+            if f"[{_user.id}]" not in read_denials:
+                permissions += "r"
+                if f"[{_user.id}]" in write_permissions:
+                    permissions += "w"
+
+        if f"[{_user.id}]" in manage_permissions:
+            permissions += "m"
+        if f"[{_user.id}]" in edit_permissions:
+            permissions += "e"
+    else:
+        # Guest _user is None
+        if read_denials == '':
+            permissions = "r"
+    return permissions
+
+
+def get_api_user_requested_write_permissions(_api, _user, _dbi_session):
+    """Return True if user requested write permission, else otherwise
+
+    the write_permission_requests field holds user ids in the format: [x][y]
+    """
+
+    if isinstance(_user, UserModel):
+        write_permission_requests = get_safe_str(_api.write_permission_requests)
+        if f"[{_user.id}]" in write_permission_requests and _user.role in USER_ROLES_WRITE_PERMISSIONS:
+            return True
+
+    return False
+
+
+def get_combined_history_object(_obj, _map, _obj_fields, _map_fields):
+    _obj_fields += ["version"]
+    _map_fields += ["version"]
+
+    # obj_version = _obj['version'] if 'version' in _obj.keys() else ''
+    map_version = _map["version"] if "version" in _map.keys() else ""
+
+    if map_version != "":
+        combined_version = f'{_obj["version"]}.{_map["version"]}'
+    else:
+        combined_version = f'{_obj["version"]}'
+
+    if "created_at" in _map.keys():
+        combined_date = _obj["created_at"] if _obj["created_at"] > _map["created_at"] else _map["created_at"]
+    else:
+        combined_date = _obj["created_at"]
+
+    _combined = {"version": combined_version, "object": {}, "mapping": {}, "created_at": combined_date}
+
+    for k in _obj_fields:
+        if k in _obj.keys():
+            _combined["object"][k] = _obj[k]
+
+    for j in _map_fields:
+        if j in _map.keys():
+            _combined["mapping"][j] = _map[j]
+
+    return _combined
+
+
+def get_reduced_history_data(history_data, _obj_fields, _map_fields, _dbi_session):
+    """
+    Remove from the history_data fields that has not been modified
+    Adding on each history element the name of the user
+    """
+    fields_to_skip = ["version", "created_at", "updated_at"]
+
+    if len(history_data) == 0:
+        return []
+
+    ret = [
+        {
+            "version": history_data[0]["version"],
+            "object": {},
+            "mapping": {},
+            "created_at": history_data[0]["created_at"].strftime("%d %b %y %H:%M"),
+        }
+    ]
+
+    for k in _obj_fields:
+        if k in history_data[0]["object"].keys() and k not in fields_to_skip:
+            ret[0]["object"][k] = history_data[0]["object"][k]
+
+    for j in _map_fields:
+        if j in history_data[0]["mapping"].keys() and j not in fields_to_skip:
+            ret[0]["mapping"][j] = history_data[0]["mapping"][j]
+
+    # Object - return user username of the first version instead of the id
+    if "edited_by_id" in ret[0]["object"].keys():
+        del ret[0]["object"]["edited_by_id"]
+    if "created_by_id" in ret[0]["object"].keys():
+        ret[0]["object"]["created_by"] = get_username_from_id(ret[0]["object"]["created_by_id"], _dbi_session)
+        del ret[0]["object"]["created_by_id"]
+
+    # Mapping - return user username of the first version instead of the id
+    if "edited_by_id" in ret[0]["mapping"].keys():
+        del ret[0]["mapping"]["edited_by_id"]
+    if "created_by_id" in ret[0]["mapping"].keys():
+        ret[0]["mapping"]["created_by"] = get_username_from_id(ret[0]["mapping"]["created_by_id"], _dbi_session)
+        del ret[0]["mapping"]["created_by_id"]
+
+    if len(history_data) > 1:
+        for i in range(1, len(history_data)):
+            tmp = {
+                "object": {},
+                "mapping": {},
+                "version": history_data[i]["version"],
+                "created_at": history_data[i]["created_at"].strftime("%d %b %y %H:%M"),
+            }
+
+            last_version = history_data[i - 1]["version"].split(".")
+            current_version = history_data[i]["version"].split(".")
+
+            if last_version[0] != current_version[0]:
+                # object changed
+                for k in _obj_fields:
+                    if k in history_data[i]["object"].keys() and k not in fields_to_skip:
+                        if history_data[i]["object"][k] != history_data[i - 1]["object"][k]:
+                            tmp["object"][k] = history_data[i]["object"][k]
+                    tmp["object"]["edited_by"] = get_username_from_id(
+                        history_data[i]["object"]["edited_by_id"], _dbi_session
+                    )
+
+            if len(last_version) > 1 and len(current_version) > 1:
+                if last_version[1] != current_version[1]:
+                    # mapping changed
+                    for j in _map_fields:
+                        if j in history_data[i]["mapping"].keys() and j not in fields_to_skip:
+                            if history_data[i]["mapping"][j] != history_data[i - 1]["mapping"][j]:
+                                tmp["mapping"][j] = history_data[i]["mapping"][j]
+                    tmp["mapping"]["edited_by"] = get_username_from_id(
+                        history_data[i]["mapping"]["edited_by_id"], _dbi_session
+                    )
+            ret.append(tmp)
+
+    return ret
+
+
+def get_dict_without_keys(_dict, _undesired_keys):
+    current_keys = _dict.keys()
+    for k in _undesired_keys:
+        if k in current_keys:
+            del _dict[k]
+    return _dict
+
+
+def get_model_editable_fields(_model, _is_history):
+    not_editable_model_fields = [
+        "id",
+        "created_at",
+        "updated_at",
+        "created_by_id",
+        "edited_by_id",
+        "delete_permissions",
+        "edit_permissions",
+        "manage_permissions",
+        "read_denials",
+        "write_permissions",
+        "write_permission_requests",
+        "checksum",
+    ]
+
+    not_editable_model_history_fields = [
+        "row_id",
+        "created_at",
+        "updated_at",
+        "delete_permissions",
+        "edit_permissions",
+        "manage_permissions",
+        "read_denials",
+        "write_permissions",
+        "write_permission_requests",
+    ]
+
+    all_fields = _model.__table__.columns.keys()
+    if not _is_history:
+        return [x for x in all_fields if x not in not_editable_model_fields]
+    else:
+        return [x for x in all_fields if x not in not_editable_model_history_fields]
+
+
+def get_dict_with_db_format_keys(_dict):
+    """
+    return a dict with keys formatted with _ instead of -
+    """
+    tmp = {}
+    for iKey in list(_dict.keys()):
+        tmp[iKey.replace("-", "_")] = _dict[iKey]
+    return tmp
+
+
+def filter_query(_query, _args, _model, _is_history):
+    fields = get_model_editable_fields(_model, _is_history)
+    for arg_key in _args.keys():
+        if "field" in arg_key:
+            field_n = arg_key.replace("field", "")
+            field = _args[f"field{field_n}"]
+            filter = _args[f"filter{field_n}"]
+            if field in fields:
+                _query = _query.filter(getattr(_model, field) == filter)
+            elif field == "id":
+                _query = _query.filter(_model.id == filter)
+
+        if arg_key == "search":
+            _query = _query.filter(
+                or_(
+                    cast(getattr(_model, field), String)
+                    .like(f'%{_args["search"]}%')
+                    for field in fields
+                )
+            )
+
+    return _query
+
+
+def get_api_coverage(_sections):
+    total_len = sum([len(x["section"]) for x in _sections])
+    wa = 0
+    for i in range(len(_sections)):
+        wa += (len(_sections[i]["section"]) / total_len) * (_sections[i]["covered"] / 100.0)
+    return int(wa * 100)
+
+
+def split_section(_to_splits, _that_split, _work_item_type):
+    sections = []
+    _current_work_item = _that_split
+
+    if _work_item_type == _SR:
+        if "indirect_sw_requirement" in _that_split.keys():
+            _current_work_item["parent_mapping_type"] = "sw_requirement_mapping_sw_requirement"
+        else:
+            _current_work_item["parent_mapping_type"] = "sw_requirement_mapping_api"
+
+    for _to_split in _to_splits:
+        _to_split_range = range(_to_split["offset"], _to_split["offset"] + len(_to_split["section"]))
+        that_split_range = range(_that_split["offset"], _that_split["offset"] + len(_that_split["section"]))
+        overlap = len(list(set(_to_split_range) & set(that_split_range))) > 0
+        if not overlap:
+            tmp_section = {
+                "section": _to_split["section"],
+                "offset": _to_split["offset"],
+                "coverage": _to_split["coverage"],
+                "covered": _to_split["covered"],
+                "gap": _to_split["gap"],
+                "delete": 0,
+                _Js: [],
+                _TCs: [],
+                _TSs: [],
+                _SRs: [],
+                _Ds: [],
+            }
+
+            for j in range(len(_to_split[_SRs])):
+                tmp_section[_SRs].append(_to_split[_SRs][j].copy())
+            for j in range(len(_to_split[_TCs])):
+                tmp_section[_TCs].append(_to_split[_TCs][j].copy())
+            for j in range(len(_to_split[_TSs])):
+                tmp_section[_TSs].append(_to_split[_TSs][j].copy())
+            for j in range(len(_to_split[_Js])):
+                tmp_section[_Js].append(_to_split[_Js][j].copy())
+            for j in range(len(_to_split[_Ds])):
+                tmp_section[_Ds].append(_to_split[_Ds][j].copy())
+
+            sections.append(tmp_section)
+
+        else:
+            idx = [
+                _to_split["offset"],
+                _to_split["offset"] + len(_to_split["section"]),
+                _that_split["offset"],
+                _that_split["offset"] + len(_that_split["section"]),
+            ]
+            idx_set = set(idx)
+            idx = sorted(list(idx_set))
+            for i in range(1, len(idx)):
+                # Compute boundaries relative to the section being split to avoid negative or zero-length slices
+                base_offset = _to_split["offset"]
+                section_start = base_offset
+                section_end = base_offset + len(_to_split["section"])
+                segment_start = max(idx[i - 1], section_start)
+                segment_end = min(idx[i], section_end)
+                if segment_end <= segment_start:
+                    continue
+                tmp_section = {
+                    "section": _to_split["section"][segment_start - base_offset: segment_end - base_offset],
+                    "offset": segment_start,
+                    "coverage": _to_split["coverage"],
+                    "covered": _to_split["covered"],
+                    "gap": _to_split["gap"],
+                    "delete": 0,
+                    _Js: [],
+                    _TCs: [],
+                    _TSs: [],
+                    _SRs: [],
+                    _Ds: [],
+                }
+
+                for j in range(len(_to_split[_SRs])):
+                    tmp_section[_SRs].append(_to_split[_SRs][j].copy())
+                for j in range(len(_to_split[_TCs])):
+                    tmp_section[_TCs].append(_to_split[_TCs][j].copy())
+                for j in range(len(_to_split[_TSs])):
+                    tmp_section[_TSs].append(_to_split[_TSs][j].copy())
+                for j in range(len(_to_split[_Js])):
+                    tmp_section[_Js].append(_to_split[_Js][j].copy())
+                for j in range(len(_to_split[_Ds])):
+                    tmp_section[_Ds].append(_to_split[_Ds][j].copy())
+
+                sections.append(tmp_section)
+
+    for iSection in range(len(sections)):
+        section_range = range(
+            sections[iSection]["offset"], sections[iSection]["offset"] + len(sections[iSection]["section"])
+        )
+        that_split_range = range(_that_split["offset"], _that_split["offset"] + len(_that_split["section"]))
+        overlap = len(list(set(section_range) & set(that_split_range))) > 0
+        if overlap:
+            sections[iSection][f"{_work_item_type}s"].append(_current_work_item)
+
+    return sections
+
+
+def get_split_sections(_specification, _mapping, _work_item_types):
+    """
+    _mapping: list of x_y (e.g. ApiSwRequirement) with nested mapping
+              each row has its own specification section information
+    _work_item_types: list of work items type for direct mapping that I
+              what to display in the current view
+    return: list of sections with related mapping
+    """
+    mapped_sections = [
+        {
+            "section": _specification,
+            "offset": 0,
+            "coverage": 0,
+            "covered": 0,
+            "gap": 100,
+            "delete": 0,
+            _TCs: [],
+            _TSs: [],
+            _SRs: [],
+            _Js: [],
+            _Ds: [],
+        }
+    ]
+
+    for iWIT in range(len(_work_item_types)):
+        _items_key = f"{_work_item_types[iWIT]}s"
+        for iMapping in range(len(_mapping[_items_key])):
+            if not _mapping[_items_key][iMapping]["match"]:
+                continue
+            mapped_sections = sorted(mapped_sections, key=lambda k: k["offset"])
+
+            # get overlapping sections
+            overlapping_section_indexes = []
+            for j in range(len(mapped_sections)):
+                section_range = range(
+                    mapped_sections[j]["offset"], mapped_sections[j]["offset"] + len(mapped_sections[j]["section"])
+                )
+                that_split_range = range(
+                    _mapping[_items_key][iMapping]["offset"],
+                    _mapping[_items_key][iMapping]["offset"] + len(_mapping[_items_key][iMapping]["section"]),
+                )
+                overlap = len(list(set(section_range) & set(that_split_range))) > 0
+                if overlap:
+                    overlapping_section_indexes.append(j)
+
+            if len(overlapping_section_indexes) > 0:
+                for k in overlapping_section_indexes:
+                    mapped_sections[k]["delete"] = 1
+
+                mapped_sections += split_section(
+                    [x for x in mapped_sections if x["delete"] == 1],
+                    _mapping[_items_key][iMapping],
+                    _work_item_types[iWIT],
+                )
+                mapped_sections = [x for x in mapped_sections if x["delete"] == 0]
+
+    for iS in range(len(mapped_sections)):
+        if mapped_sections[iS]["section"].strip() == "":
+            if (
+                sum(
+                    [
+                        len(mapped_sections[iS][_SRs]),
+                        len(mapped_sections[iS][_TSs]),
+                        len(mapped_sections[iS][_TCs]),
+                        len(mapped_sections[iS][_Js]),
+                        len(mapped_sections[iS][_Ds]),
+                    ]
+                )
+                == 0
+            ):
+                mapped_sections[iS]["delete"] = True
+
+        coverage_total = 0
+        for j in range(len(mapped_sections[iS][_SRs])):
+            coverage_total += mapped_sections[iS][_SRs][j]["covered"]
+        for j in range(len(mapped_sections[iS][_TCs])):
+            coverage_total += mapped_sections[iS][_TCs][j]["covered"]
+        for j in range(len(mapped_sections[iS][_TSs])):
+            coverage_total += mapped_sections[iS][_TSs][j]["covered"]
+        for j in range(len(mapped_sections[iS][_Js])):
+            coverage_total += mapped_sections[iS][_Js][j]["covered"]
+        for j in range(len(mapped_sections[iS][_Ds])):
+            coverage_total += mapped_sections[iS][_Ds][j]["covered"]
+        mapped_sections[iS]["covered"] = min(max(coverage_total, 0), 100)
+
+    # Remove Section with section: \n and no work items
+    mapped_sections = [x for x in mapped_sections if not x["delete"]]
+    return sorted(mapped_sections, key=lambda k: k["offset"])
+
+
+def get_wrong_mandatory_fields(fields=[], request={}, allow_empty_string=True, int_fields=[]) -> bool:
+    wrong_fields = []
+    for field in fields + int_fields:
+        if field not in request.keys():
+            wrong_fields.append(field)
+        else:
+            if allow_empty_string:
+                pass
+            else:
+                if not str(request[field]):
+                    wrong_fields.append(field)
+
+    for field in int_fields:
+        if parse_int(request.get(field)) is None:
+            wrong_fields.append(field)
+
+    return wrong_fields
+
+
+def check_fields_in_request(fields=[], request={}, allow_empty_string=True, int_fields=[]) -> bool:
+    wrong_fields = get_wrong_mandatory_fields(fields, request, allow_empty_string, int_fields)
+    if len(wrong_fields) > 0:
+        return False
+    return True
+
+
+def get_query_string_args(args):
+    db = args.get("db", default="head", type=str)
+    limit = args.get("limit", default="", type=str)
+    order_by = args.get("order_by", default="", type=str)
+    order_how = args.get("order_how", default="", type=str)
+
+    permitted_keys = [
+        "api-id",
+        "artifact",
+        "email",
+        "filename",
+        "filter",
+        "id",
+        "job",
+        "library",
+        "mapping-view",
+        "mapped_to_id",
+        "mapped_to_type",
+        "mode",
+        "page",
+        "params",
+        "parent_id",
+        "parent_table",
+        "per_page",
+        "plugin",
+        "preset",
+        "ref",
+        "relation_id",
+        "relation-id",
+        "relation-to",
+        "reset_token",
+        "search",
+        "stage",
+        "test-case-id",
+        "test_run_config_id",
+        "test_runs_limit",
+        "path",
+        "recursive",
+        "token",
+        "url",
+        "user-id",
+        "work_item_type",
+        EXP_CONF_INCLUDE_JUSTIFICATIONS,
+        EXP_CONF_INCLUDE_DOCUMENTS,
+        EXP_CONF_INCLUDE_TEST_SPECIFICATIONS,
+        EXP_CONF_INCLUDE_TEST_CASES,
+        EXP_CONF_INCLUDE_TEST_RUNS,
+        EXP_CONF_INCLUDE_COMMENTS,
+        EXP_CONF_INCLUDE_TOOLS,
+    ]
+
+    ret = {"db": db, "limit": limit, "order_by": order_by, "order_how": order_how}
+
+    i = 1
+    while True:
+        if args.get(f"field{i}") and args.get(f"filter{i}"):
+            ret[f"field{i}"] = args.get(f"field{i}")
+            ret[f"filter{i}"] = args.get(f"filter{i}")
+            i = i + 1
+        else:
+            break
+
+    if "join" in args.keys() and "join_id" in args.keys():
+        ret["join"] = args.get("join")
+        ret["join_id"] = args.get("join_id")
+
+    for k in permitted_keys:
+        if k in args.keys():
+            ret[k] = args.get(k)
+
+    return ret
+
+
+def get_sw_requirement_children(_dbi, _srm, config={}):
+    """Get hierichical mapping of Sw Requirements"""
+    undesired_keys = []
+
+    include_test_specifications = bool_from_string(config.get(EXP_CONF_INCLUDE_TEST_SPECIFICATIONS, "true"))
+    include_test_cases = bool_from_string(config.get(EXP_CONF_INCLUDE_TEST_CASES, "true"))
+
+    mapping_field_id = f"{_srm['__tablename__']}_id"
+
+    tmp = _srm
+
+    # Indirect SwRequirement
+    ind_sr_query = _dbi.session.query(SwRequirementSwRequirementModel).filter(
+        getattr(SwRequirementSwRequirementModel, mapping_field_id) == _srm["relation_id"]
+    )
+    ind_sr = ind_sr_query.all()
+
+    tmp[_SRs] = [get_dict_without_keys(x.as_dict(db_session=_dbi.session), undesired_keys + ["api"]) for x in ind_sr]
+
+    for iSR in range(len(tmp[_SRs])):
+        if "indirect_sw_requirement" in tmp[_SRs][iSR].keys():
+            tmp[_SRs][iSR]["parent_mapping_type"] = "sw_requirement_mapping_sw_requirement"
+        else:
+            tmp[_SRs][iSR]["parent_mapping_type"] = "sw_requirement_mapping_api"
+
+    # Indirect Test Specifications
+    if include_test_specifications:
+        ind_ts = (
+            _dbi.session.query(SwRequirementTestSpecificationModel)
+            .filter(getattr(SwRequirementTestSpecificationModel, mapping_field_id) == _srm["relation_id"])
+            .all()
+        )
+        tmp[_TSs] = [
+            get_dict_without_keys(
+                x.as_dict(db_session=_dbi.session),
+                undesired_keys + ["api", "sw_requirement_mapping_sw_requirement"]
+            ) for x in ind_ts]
+
+        for iTS in range(len(tmp[_TSs])):
+            # Indirect Test Cases
+            if include_test_cases:
+                curr_srts_id = tmp[_TSs][iTS]["relation_id"]
+                ind_tc = (
+                    _dbi.session.query(TestSpecificationTestCaseModel)
+                    .filter(
+                        TestSpecificationTestCaseModel.test_specification_mapping_sw_requirement_id == curr_srts_id
+                    )
+                    .all()
+                )
+
+                tmp[_TSs][iTS][_TS][_TCs] = [
+                    get_dict_without_keys(x.as_dict(db_session=_dbi.session), undesired_keys + ["api"]) for x in ind_tc
+                ]
+
+    # Indirect Test Cases
+    if include_test_cases:
+        ind_tc = (
+            _dbi.session.query(SwRequirementTestCaseModel)
+            .filter(getattr(SwRequirementTestCaseModel, mapping_field_id) == _srm["relation_id"])
+            .all()
+        )
+        tmp[_TCs] = [
+            get_dict_without_keys(
+                x.as_dict(db_session=_dbi.session), undesired_keys + ["api", "sw_requirement_mapping_api"]
+            )
+            for x in ind_tc
+        ]
+
+    # Recursive updating of nested SwRequirements
+    for iNSR in range(len(tmp[_SRs])):
+        tmp[_SRs][iNSR] = get_sw_requirement_children(_dbi, tmp[_SRs][iNSR], config)
+
+    return tmp
+
+
+def get_indirect_work_items_from_hierichical_mapping(dbi, mapping, work_items_type, _seen_ids=None):
+    """Return all nested work items of the requested type from a hierarchical mapping.
+
+    - mapping: hierarchical mapping dict (as returned by get_*_children)
+    - work_items_type: one of _ALL_WORK_ITEMS_TYPES (case/format-insensitive)
+    - deduplicates by id while preserving order of first encounter
+    """
+
+    work_items_type = work_items_type.lower().replace("-", "_").strip()
+    seen_ids = _seen_ids if _seen_ids is not None else set()
+
+    found_items = []
+
+    # 1) If the current node contains an item of the requested type, collect it
+    current_item = mapping.get(work_items_type, {})
+    if isinstance(current_item, dict):
+        current_id = current_item.get("id")
+        if current_id is not None and current_id not in seen_ids:
+            # Copy to avoid mutating the original mapping when removing keys
+            item_copy = dict(current_item)
+            found_items.append(get_dict_without_keys(item_copy, _ALL_WORK_ITEMS_TYPES))
+            seen_ids.add(current_id)
+
+    # 2) Recurse into all supported nested collections (pluralized keys)
+    for nested_type in _ALL_WORK_ITEMS_TYPES:
+        nested_collection = mapping.get(f"{nested_type}s", [])
+        if not nested_collection:
+            continue
+        for child_mapping in nested_collection:
+            found_items.extend(
+                get_indirect_work_items_from_hierichical_mapping(dbi, child_mapping, work_items_type, seen_ids)
+            )
+
+    # 3) Also recurse into collections nested under ANY singular item present at this node
+    for singular_type in _ALL_WORK_ITEMS_TYPES:
+        singular_item = mapping.get(singular_type)
+        if not isinstance(singular_item, dict):
+            continue
+        for nested_type in _ALL_WORK_ITEMS_TYPES:
+            nested_collection = singular_item.get(f"{nested_type}s", [])
+            if not nested_collection:
+                continue
+            for child_mapping in nested_collection:
+                found_items.extend(
+                    get_indirect_work_items_from_hierichical_mapping(dbi, child_mapping, work_items_type, seen_ids)
+                )
+
+    return found_items
+
+
+def get_document_children(_dbi, _document_mapping):
+    """Get hierichical mapping of Documents"""
+    undesired_keys = []
+
+    mapping_field_id = f"{_document_mapping['__tablename__']}_id"
+
+    tmp = _document_mapping
+
+    # Indirect Documents
+    ind_document_query = _dbi.session.query(DocumentDocumentModel).filter(
+        getattr(DocumentDocumentModel, mapping_field_id) == _document_mapping["relation_id"]
+    )
+    ind_docs = ind_document_query.all()
+
+    tmp[_Ds] = [get_dict_without_keys(x.as_dict(db_session=_dbi.session), undesired_keys + ["api"]) for x in ind_docs]
+
+    for iD in range(len(tmp[_Ds])):
+        if "indirect_document" in tmp[_Ds][iD].keys():
+            tmp[_Ds][iD]["parent_mapping_type"] = "document_mapping_document"
+        else:
+            tmp[_Ds][iD]["parent_mapping_type"] = "document_mapping_api"
+
+    # Recursive updating of nested Documents
+    for iND in range(len(tmp[_Ds])):
+        tmp[_Ds][iND] = get_document_children(_dbi, tmp[_Ds][iND])
+
+    return tmp
+
+
+def get_api_sw_requirements_mapping_sections(dbi, api, config={}):
+
+    include_justifications = bool_from_string(config.get(EXP_CONF_INCLUDE_JUSTIFICATIONS, "true"))
+    include_documents = bool_from_string(config.get(EXP_CONF_INCLUDE_DOCUMENTS, "true"))
+
+    api_specification = get_api_specification(api.raw_specification_url)
+    if api_specification is None:
+        api_specification = (
+            "WARNING: Unable to load the Reference Document, "
+            "please check the url/path value in the Software Component properties "
+            "and that the file still exists in the expected location"
+        )
+
+    sr = (
+        dbi.session.query(ApiSwRequirementModel)
+        .filter(ApiSwRequirementModel.api_id == api.id)
+        .order_by(ApiSwRequirementModel.offset.asc())
+        .all()
+    )
+    sr_mapping = [x.as_dict(db_session=dbi.session) for x in sr]
+
+    documents_mapping = []
+    if include_documents:
+        documents = (
+            dbi.session.query(ApiDocumentModel)
+            .filter(ApiDocumentModel.api_id == api.id)
+            .order_by(ApiDocumentModel.offset.asc())
+            .all()
+        )
+        documents_mapping = [x.as_dict(db_session=dbi.session) for x in documents]
+
+    justifications_mapping = []
+    if include_justifications:
+        justifications = (
+            dbi.session.query(ApiJustificationModel)
+            .filter(ApiJustificationModel.api_id == api.id)
+            .order_by(ApiJustificationModel.offset.asc())
+            .all()
+        )
+        justifications_mapping = [x.as_dict(db_session=dbi.session) for x in justifications]
+
+    mapping = {_A: api.as_dict(), _SRs: sr_mapping, _Js: justifications_mapping, _Ds: documents_mapping}
+
+    for iType in [_SRs, _Js, _Ds]:
+        for iMapping in range(len(mapping[iType])):
+            current_offset = mapping[iType][iMapping]["offset"]
+            current_section = mapping[iType][iMapping]["section"]
+            mapping[iType][iMapping]["match"] = (
+                api_specification[current_offset: current_offset + len(current_section)] == current_section
+            )
+
+    mapped_sections = get_split_sections(api_specification, mapping, [_SR, _J, _D])
+    unmapped_sections = [x for x in mapping[_SRs] if not x["match"]]
+    unmapped_sections += [x for x in mapping[_Js] if not x["match"]]
+    unmapped_sections += [x for x in mapping[_Ds] if not x["match"]]
+
+    unmapped_sections = extend_unmapped_sections_for_auto_fix(unmapped_sections, api_specification)
+
+    for iMS in range(len(mapped_sections)):
+        for iD in range(len(mapped_sections[iMS][_Ds])):
+            document_children_data = get_document_children(dbi, mapped_sections[iMS][_Ds][iD])
+            mapped_sections[iMS][_Ds][iD] = document_children_data
+
+        for iSR in range(len(mapped_sections[iMS][_SRs])):
+            sw_requirement_children_data = get_sw_requirement_children(dbi, mapped_sections[iMS][_SRs][iSR], config)
+            mapped_sections[iMS][_SRs][iSR] = sw_requirement_children_data
+
+    ret = {"mapped": mapped_sections, "unmapped": unmapped_sections}
+
+    return ret
+
+
+def get_api_test_specifications_mapping_sections(dbi, api):
+    undesired_keys = ["section", "offset"]
+
+    api_specification = get_api_specification(api.raw_specification_url)
+    if api_specification is None:
+        return []
+
+    ts = (
+        dbi.session.query(ApiTestSpecificationModel)
+        .filter(ApiTestSpecificationModel.api_id == api.id)
+        .order_by(ApiTestSpecificationModel.offset.asc())
+        .all()
+    )
+    ts_mapping = [x.as_dict(db_session=dbi.session) for x in ts]
+
+    documents = (
+        dbi.session.query(ApiDocumentModel)
+        .filter(ApiDocumentModel.api_id == api.id)
+        .order_by(ApiDocumentModel.offset.asc())
+        .all()
+    )
+    documents_mapping = [x.as_dict(db_session=dbi.session) for x in documents]
+
+    justifications = (
+        dbi.session.query(ApiJustificationModel)
+        .filter(ApiJustificationModel.api_id == api.id)
+        .order_by(ApiJustificationModel.offset.asc())
+        .all()
+    )
+    justifications_mapping = [x.as_dict(db_session=dbi.session) for x in justifications]
+
+    mapping = {_A: api.as_dict(), _TSs: ts_mapping, _Js: justifications_mapping, _Ds: documents_mapping}
+
+    for iTS in range(len(mapping[_TSs])):
+        # Indirect Test Cases
+        curr_ats_id = mapping[_TSs][iTS]["relation_id"]
+
+        ind_tc = (
+            dbi.session.query(TestSpecificationTestCaseModel)
+            .filter(TestSpecificationTestCaseModel.test_specification_mapping_api_id == curr_ats_id)
+            .all()
+        )
+        mapping[_TSs][iTS][_TS][_TCs] = [
+            get_dict_without_keys(x.as_dict(db_session=dbi.session), undesired_keys + ["api"]) for x in ind_tc
+        ]
+
+    for iType in [_TSs, _Js, _Ds]:
+        for iMapping in range(len(mapping[iType])):
+            current_offset = mapping[iType][iMapping]["offset"]
+            current_section = mapping[iType][iMapping]["section"]
+            mapping[iType][iMapping]["match"] = (
+                api_specification[current_offset: current_offset + len(current_section)] == current_section
+            )
+
+    mapped_sections = get_split_sections(api_specification, mapping, [_TS, _J, _D])
+    unmapped_sections = [x for x in mapping[_TSs] if not x["match"]]
+    unmapped_sections += [x for x in mapping[_Js] if not x["match"]]
+    unmapped_sections += [x for x in mapping[_Ds] if not x["match"]]
+
+    unmapped_sections = extend_unmapped_sections_for_auto_fix(unmapped_sections, api_specification)
+
+    for iMS in range(len(mapped_sections)):
+        for iD in range(len(mapped_sections[iMS][_Ds])):
+            document_children_data = get_document_children(dbi, mapped_sections[iMS][_Ds][iD])
+            mapped_sections[iMS][_Ds][iD] = document_children_data
+
+    ret = {"mapped": mapped_sections, "unmapped": unmapped_sections}
+
+    return ret
+
+
+def get_api_test_cases_mapping_sections(dbi, api):
+    api_specification = get_api_specification(api.raw_specification_url)
+    if api_specification is None:
+        return []
+
+    tc = (
+        dbi.session.query(ApiTestCaseModel)
+        .filter(ApiTestCaseModel.api_id == api.id)
+        .order_by(ApiTestCaseModel.offset.asc())
+        .all()
+    )
+    tc_mapping = [x.as_dict(db_session=dbi.session) for x in tc]
+
+    documents = (
+        dbi.session.query(ApiDocumentModel)
+        .filter(ApiDocumentModel.api_id == api.id)
+        .order_by(ApiDocumentModel.offset.asc())
+        .all()
+    )
+    documents_mapping = [x.as_dict(db_session=dbi.session) for x in documents]
+
+    justifications = (
+        dbi.session.query(ApiJustificationModel)
+        .filter(ApiJustificationModel.api_id == api.id)
+        .order_by(ApiJustificationModel.offset.asc())
+        .all()
+    )
+    justifications_mapping = [x.as_dict(db_session=dbi.session) for x in justifications]
+
+    mapping = {_A: api.as_dict(), _TCs: tc_mapping, _Js: justifications_mapping, _Ds: documents_mapping}
+
+    for iType in [_TCs, _Js, _Ds]:
+        for iMapping in range(len(mapping[iType])):
+            current_offset = mapping[iType][iMapping]["offset"]
+            current_section = mapping[iType][iMapping]["section"]
+            mapping[iType][iMapping]["match"] = (
+                api_specification[current_offset: current_offset + len(current_section)] == current_section
+            )
+
+    mapped_sections = get_split_sections(api_specification, mapping, [_TC, _J, _D])
+    unmapped_sections = [x for x in mapping[_TCs] if not x["match"]]
+    unmapped_sections += [x for x in mapping[_Js] if not x["match"]]
+    unmapped_sections += [x for x in mapping[_Ds] if not x["match"]]
+
+    unmapped_sections = extend_unmapped_sections_for_auto_fix(unmapped_sections, api_specification)
+
+    for iMS in range(len(mapped_sections)):
+        for iD in range(len(mapped_sections[iMS][_Ds])):
+            document_children_data = get_document_children(dbi, mapped_sections[iMS][_Ds][iD])
+            mapped_sections[iMS][_Ds][iD] = document_children_data
+
+    ret = {"mapped": mapped_sections, "unmapped": unmapped_sections}
+
+    return ret
+
+
+def check_direct_work_items_against_another_spec_file(db_session, spec, api):
+    ret = {
+        "sw-requirements": {"ok": [], "ko": [], "warning": []},
+        "test-specifications": {"ok": [], "ko": [], "warning": []},
+        "test-cases": {"ok": [], "ko": [], "warning": []},
+        "justifications": {"ok": [], "ko": [], "warning": []},
+        "documents": {"ok": [], "ko": [], "warning": []},
+    }
+
+    if not spec:
+        return ret
+
+    # ApiSwRequirement
+    api_srs = db_session.query(ApiSwRequirementModel).filter(ApiSwRequirementModel.api_id == api.id).all()
+    for api_sr in api_srs:
+        if api_sr.section in spec:
+            if spec.index(api_sr.section) == api_sr.offset:
+                ret["sw-requirements"]["ok"].append({"id": api_sr.id, "title": api_sr.sw_requirement.title})
+            else:
+                ret["sw-requirements"]["warning"].append(
+                    {
+                        "id": api_sr.id,
+                        "old-offset": api_sr.offset,
+                        "new-offset": spec.index(api_sr.section),
+                        "title": api_sr.sw_requirement.title,
+                    }
+                )
+        else:
+            ret["sw-requirements"]["ko"].append({"id": api_sr.id, "title": api_sr.sw_requirement.title})
+
+    # ApiTestSpecification
+    api_tss = db_session.query(ApiTestSpecificationModel).filter(ApiTestSpecificationModel.api_id == api.id).all()
+    for api_ts in api_tss:
+        if api_ts.section in spec:
+            if spec.index(api_ts.section) == api_ts.offset:
+                ret["test-specifications"]["ok"].append({"id": api_ts.id, "title": api_ts.test_specification.title})
+            else:
+                ret["test-specifications"]["warning"].append(
+                    {
+                        "id": api_ts.id,
+                        "old-offset": api_ts.offset,
+                        "new-offset": spec.index(api_ts.section),
+                        "title": api_ts.test_specification.title,
+                    }
+                )
+        else:
+            ret["test-specifications"]["ko"].append({"id": api_ts.id, "title": api_ts.test_specification.title})
+
+    # ApiTestCase
+    api_tcs = db_session.query(ApiTestCaseModel).filter(ApiTestCaseModel.api_id == api.id).all()
+    for api_tc in api_tcs:
+        if api_tc.section in spec:
+            if spec.index(api_tc.section) == api_tc.offset:
+                ret["test-cases"]["ok"].append({"id": api_tc.id, "title": api_tc.test_case.title})
+            else:
+                ret["test-cases"]["warning"].append(
+                    {
+                        "id": api_tc.id,
+                        "old-offset": api_tc.offset,
+                        "new-offset": spec.index(api_tc.section),
+                        "title": api_tc.test_case.title,
+                    }
+                )
+        else:
+            ret["test-cases"]["ko"].append({"id": api_tc.id, "title": api_tc.test_case.title})
+
+    # ApiJustification
+    api_js = db_session.query(ApiJustificationModel).filter(ApiJustificationModel.api_id == api.id).all()
+    for api_j in api_js:
+        if api_j.section in spec:
+            if spec.index(api_j.section) == api_j.offset:
+                ret["justifications"]["ok"].append({"id": api_j.id, "title": api_j.justification.description})
+            else:
+                ret["justifications"]["warning"].append(
+                    {
+                        "id": api_j.id,
+                        "old-offset": api_j.offset,
+                        "new-offset": spec.index(api_j.section),
+                        "title": api_j.justification.description,
+                    }
+                )
+        else:
+            ret["justifications"]["ko"].append({"id": api_j.id, "title": api_j.justification.description})
+
+    # ApiDocument
+    api_docs = db_session.query(ApiDocumentModel).filter(ApiDocumentModel.api_id == api.id).all()
+    for api_doc in api_docs:
+        if api_doc.section in spec:
+            if spec.index(api_doc.section) == api_doc.offset:
+                ret["documents"]["ok"].append({"id": api_doc.id, "title": api_doc.document.title})
+            else:
+                ret["documents"]["warning"].append(
+                    {
+                        "id": api_doc.id,
+                        "old-offset": api_doc.offset,
+                        "new-offset": spec.index(api_doc.section),
+                        "title": api_doc.document.title,
+                    }
+                )
+        else:
+            ret["documents"]["ko"].append({"id": api_doc.id, "title": api_doc.document.title})
+
+    return ret
+
+
+class Token:
+
+    def filter(self, token):
+        if token == app.secret_key:
+            return True
+        return False
+
+
+def add_test_run_config(dbi, request_data, user, api_response: ApiResponse = None):
+    mandatory_fields = ["environment_vars", "git_repo_ref", "id", "plugin", "plugin_preset", "title"]
+    tmt_mandatory_fields = ["context_vars", "provision_guest", "provision_guest_port", "provision_type", "ssh_key"]
+    gitlab_ci_mandatory_fields = ["job", "private_token", "project_id", "stage", "trigger_token", "url"]
+    github_actions_mandatory_fields = ["job", "private_token", "url", "workflow_id"]
+    kernel_ci_mandatory_fields = []
+    testing_farm_mandatory_fields = ["arch", "compose", "private_token", "url"]
+    lava_mandatory_fields = ["job", "private_token", "url"]
+
+    wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+    if len(wrong_fields) > 0:
+        api_response.set_missing_fields(wrong_fields)
+        return api_response.return_bad_request_missing_fields()
+
+    if request_data["id"] not in ["", 0]:
+        if str(request_data["id"]).strip().isnumeric():
+            testrun_config_id = int(str(request_data["id"]))
+            try:
+                existing_config = (
+                    dbi.session.query(TestRunConfigModel).filter(TestRunConfigModel.id == testrun_config_id).one()
+                )
+                api_response.set_data(existing_config.as_dict())
+                return api_response.return_ok()
+            except NoResultFound:
+                api_response.set_message("Unable to find the Test Run Configuration")
+                return api_response.return_bad_request()
+        else:
+            api_response.set_message("Test Run Configuration ID is not valid")
+            return api_response.return_bad_request()
+
+    if request_data["plugin"] not in TestRunner.test_run_plugin_models.keys():
+        wrong_fields = get_wrong_mandatory_fields(tmt_mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+    # Config
+    config_title = str(request_data["title"]).strip()
+    environment_vars = str(request_data["environment_vars"]).strip()
+    git_repo_ref = str(request_data["git_repo_ref"]).strip()
+    plugin = str(request_data["plugin"]).strip()
+    plugin_preset = str(request_data["plugin_preset"]).strip()
+    plugin_vars = ""
+    context_vars = ""
+    provision_type = ""
+    provision_guest = ""
+    provision_guest_port = ""
+    ssh_key = None
+
+    # Check mandatory fields
+    if config_title == "":
+        api_response.set_message("Empty Configuration Title")
+        return api_response.return_bad_request()
+
+    if plugin == TestRunner.TMT:
+        wrong_fields = get_wrong_mandatory_fields(tmt_mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        context_vars = str(request_data["context_vars"]).strip()
+        provision_type = str(request_data["provision_type"]).strip()
+        provision_guest = str(request_data["provision_guest"]).strip()
+        provision_guest_port = str(request_data["provision_guest_port"]).strip()
+        ssh_key_id = request_data["ssh_key"]
+
+        if not plugin_preset:
+            if not provision_type:
+                api_response.set_message("tmt provision type not defined")
+                return api_response.return_bad_request()
+
+            if provision_type == "connect":
+                if provision_guest == "" or provision_guest_port == "" or ssh_key_id == "" or ssh_key_id == "0":
+                    api_response.set_message("tmt provision configuration is not correct")
+                    return api_response.return_bad_request()
+
+                try:
+                    ssh_key = (
+                        dbi.session.query(SshKeyModel)
+                        .filter(SshKeyModel.id == ssh_key_id, SshKeyModel.created_by_id == user.id)
+                        .one()
+                    )
+                except NoResultFound:
+                    api_response.set_message("Unable to find the SSH Key")
+                    return api_response.return_bad_request()
+
+    elif plugin == TestRunner.GITLAB_CI:
+        if not check_fields_in_request(gitlab_ci_mandatory_fields, request_data):
+            api_response.set_message("GitlabCI miss mandatory fields")
+            return api_response.return_bad_request()
+        plugin_vars += ";".join(
+            [f"{field}={str(request_data[field]).strip()}" for field in gitlab_ci_mandatory_fields]
+        )
+    elif plugin == TestRunner.GITHUB_ACTIONS:
+        if not check_fields_in_request(github_actions_mandatory_fields, request_data):
+            api_response.set_message("Github Actions miss mandatory fields")
+            return api_response.return_bad_request()
+        plugin_vars += ";".join(
+            [f"{field}={str(request_data[field]).strip()}" for field in github_actions_mandatory_fields]
+        )
+    elif plugin == TestRunner.KERNEL_CI:
+        if not check_fields_in_request(kernel_ci_mandatory_fields, request_data):
+            api_response.set_message("KernelCI miss mandatory fields")
+            return api_response.return_bad_request()
+        plugin_vars += ";".join(
+            [f"{field}={str(request_data[field]).strip()}" for field in kernel_ci_mandatory_fields]
+        )
+    elif plugin == TestRunner.TESTING_FARM:
+        if not check_fields_in_request(testing_farm_mandatory_fields, request_data):
+            api_response.set_message("Testing Farm miss mandatory fields")
+            return api_response.return_bad_request()
+        context_vars = str(request_data["context_vars"]).strip()
+        plugin_vars += ";".join(
+            [f"{field}={str(request_data[field]).strip()}" for field in testing_farm_mandatory_fields]
+        )
+    elif plugin == TestRunner.LAVA:
+        if not check_fields_in_request(lava_mandatory_fields, request_data):
+            api_response.set_message("LAVA miss mandatory fields")
+            return api_response.return_bad_request()
+        plugin_vars += ";".join(
+            [f"{field}={str(request_data[field]).strip()}" for field in lava_mandatory_fields]
+        )
+
+    test_config = TestRunConfigModel(
+        plugin,
+        plugin_preset,
+        plugin_vars,
+        config_title,
+        git_repo_ref,
+        context_vars,
+        environment_vars,
+        provision_type,
+        provision_guest,
+        provision_guest_port,
+        ssh_key,
+        user,
+    )
+
+    # Avoid duplicate test run configurations
+    existing_config = dbi.session.query(TestRunConfigModel).filter(
+        TestRunConfigModel.title == config_title,
+        TestRunConfigModel.plugin == plugin,
+        TestRunConfigModel.plugin_preset == plugin_preset,
+        TestRunConfigModel.plugin_vars == plugin_vars,
+        TestRunConfigModel.git_repo_ref == git_repo_ref,
+        TestRunConfigModel.context_vars == context_vars,
+        TestRunConfigModel.environment_vars == environment_vars,
+        TestRunConfigModel.provision_type == provision_type,
+        TestRunConfigModel.provision_guest == provision_guest,
+        TestRunConfigModel.provision_guest_port == provision_guest_port,
+        TestRunConfigModel.ssh_key_id == (ssh_key.id if ssh_key else None),
+    ).first()
+    if existing_config:
+        api_response.set_message(f"Test Run Configuration already exists at id {existing_config.id}")
+        return api_response.return_conflict()
+
+    dbi.session.add(test_config)
+    dbi.session.commit()
+    ret = test_config
+    api_response.set_data(ret)
+    return api_response.return_created()
+
+
+def check_api_user_permission(
+    required_permissions,
+    required_roles=None,
+    permission_name=None,
+):
+    """
+    Factory that returns a decorator to check API user permissions.
+
+    Args:
+        required_permissions: List of permission chars (e.g. ["r"], ["r", "w"])
+            All must be present in user_permissions; checked in order (write implies read).
+        required_roles: Optional list of allowed roles (e.g. USER_ROLES_EDIT_PERMISSIONS).
+        permission_name: Used in error message (e.g. "read", "write", "edit", "manage").
+
+    Returns:
+        Decorator that injects api, dbi, user into the wrapped function.
+    """
+    perm_label = permission_name or required_permissions[-1]
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            if request.is_json:
+                request_data = request.get_json(force=True)
+            else:
+                request_data = request.args
+
+            api_response = ApiResponse()
+            api_response.set_logger(logger)
+            api_response.set_args(request_data)
+
+            wrong_fields = get_wrong_mandatory_fields(
+                fields=[],
+                request=request_data,
+                allow_empty_string=False,
+                int_fields=["api-id"],
+            )
+            if len(wrong_fields) > 0:
+                api_response.set_missing_fields(wrong_fields)
+                return api_response.return_bad_request_missing_fields()
+
+            dbi = get_db()
+            user = get_active_user_from_request(request_data, dbi.session)
+
+            try:
+                api = dbi.session.query(ApiModel).filter(
+                    ApiModel.id == request_data["api-id"]
+                ).one()
+            except NoResultFound:
+                return api_response.return_not_found_sw_component()
+            except Exception as e:
+                api_response.set_exception(e)
+                return api_response.return_server_error()
+
+            user_permissions = get_api_user_permissions(api, user, dbi.session)
+
+            for perm in required_permissions:
+                if perm not in user_permissions:
+                    if isinstance(user, UserModel):
+                        api_response.set_message(f"Username {user.username} needs {perm_label} permission.")
+                        return api_response.return_unauthorized()
+                    api_response.set_message("GUEST user cannot access this content.")
+                    return api_response.return_unauthorized()
+
+            if required_roles is not None and user.role not in required_roles:
+                if isinstance(user, UserModel):
+                    api_response.set_message(f"Username {user.username} needs {perm_label} permission.")
+                    return api_response.return_unauthorized()
+                api_response.set_message("GUEST user cannot access this content.")
+                return api_response.return_unauthorized()
+
+            try:
+                result = func(*args, **kwargs, api=api, dbi=dbi, user=user)
+            finally:
+                dbi.close()
+            return result
+
+        return wrapper
+    return decorator
+
+
+# Permission decorators using the common factory
+# (write implies read, edit implies write, manage implies edit)
+check_api_user_read_permission = check_api_user_permission(
+    required_permissions=["r"],
+    required_roles=None,
+    permission_name="read",
+)
+check_api_user_write_permission = check_api_user_permission(
+    required_permissions=["r", "w"],
+    required_roles=USER_ROLES_WRITE_PERMISSIONS,
+    permission_name="write",
+)
+check_api_user_edit_permission = check_api_user_permission(
+    required_permissions=["e"],
+    required_roles=USER_ROLES_EDIT_PERMISSIONS,
+    permission_name="edit",
+)
+check_api_user_manage_permission = check_api_user_permission(
+    required_permissions=["m"],
+    required_roles=USER_ROLES_MANAGE_PERMISSIONS,
+    permission_name="manage",
+)
+
+
+tokenManager = Token()
+
+
+class Alert(Resource):
+    route = "/alert"
+
+    response = {
+            "info": [],
+            "danger": [],
+            "warning": [],
+            "success": [],
+        }
+
+    def get_alert_settings(self):
+
+        def populate_alert_type(alert_dict, settings, alert_type):
+            # Avoid duplicate messages
+            if alert_type in settings["alert"]:
+                if isinstance(settings["alert"][alert_type], list):
+                    alert_dict[alert_type] = list(set(settings["alert"][alert_type]))
+                elif isinstance(settings["alert"][alert_type], str):
+                    if settings["alert"][alert_type] not in alert_dict[alert_type]:
+                        alert_dict[alert_type].append(settings["alert"][alert_type])
+            return alert_dict
+
+        response = copy.deepcopy(self.response)
+        settings = get_updated_settings()
+
+        if "alert" in settings:
+            response = populate_alert_type(response, settings, "info")
+            response = populate_alert_type(response, settings, "danger")
+            response = populate_alert_type(response, settings, "warning")
+            response = populate_alert_type(response, settings, "success")
+        return response
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        """
+        delete an alert
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["message", "type"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if request_data["type"] not in self.response.keys():
+            api_response.set_message(f"Alert type {request_data['type']} not found")
+            return api_response.return_bad_request()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        settings = get_updated_settings()
+
+        if not settings:
+            settings = {
+                "alert": self.response
+            }
+        else:
+            if "alert" not in settings.keys():
+                settings["alert"] = self.response
+            else:
+                if request_data["type"] not in settings["alert"].keys():
+                    settings["alert"][request_data["type"]] = []
+                else:
+                    if not isinstance(settings["alert"][request_data["type"]], list):
+                        settings["alert"][request_data["type"]] = []
+
+        settings["alert"][request_data["type"]] = [message for message in
+                                                   settings["alert"][request_data["type"]] if
+                                                   request_data["message"] not in message]
+
+        yaml_settings_str = yaml.dump(settings, sort_keys=True)
+
+        f = open(SETTINGS_FILEPATH, "w")
+        f.write(yaml_settings_str)
+        f.close()
+
+        api_response.set_data(self.get_alert_settings())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get alert settings
+        """
+        api_response.set_data(self.get_alert_settings())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        post an alert
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["message", "type"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if request_data["type"] not in self.response.keys():
+            api_response.set_message(f"Alert type {request_data['type']} not found")
+            return api_response.return_bad_request()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        settings = get_updated_settings()
+
+        if not settings:
+            settings = {
+                "alert": self.response
+            }
+        else:
+            if "alert" not in settings.keys():
+                settings["alert"] = self.response
+            else:
+                if request_data["type"] not in settings["alert"].keys():
+                    settings["alert"][request_data["type"]] = []
+                else:
+                    if not isinstance(settings["alert"][request_data["type"]], list):
+                        settings["alert"][request_data["type"]] = []
+
+        settings["alert"][request_data["type"]].append(request_data["message"])
+
+        yaml_settings_str = yaml.dump(settings, sort_keys=True)
+
+        f = open(SETTINGS_FILEPATH, "w")
+        f.write(yaml_settings_str)
+        f.close()
+
+        api_response.set_data(self.get_alert_settings())
+        return api_response.return_created()
+
+
+class SPDXApi(Resource):
+    route = "/spdx/apis"
+    fields = ["filename"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        """
+        get SPDX APIs
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["filename"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        test_runs_limit = request_data.get("test_runs_limit", 5)
+
+        if not str(test_runs_limit).isdigit():
+            test_runs_limit = 5
+
+        spdxManager = SPDXManager(
+            user=user,
+            library_name=api.library,
+            apis=[api],
+            include_test_runs=True,
+            test_runs_limit=test_runs_limit,
+            dbi=dbi
+        )
+
+        spdx_public_path = os.path.join(currentdir, "public", "spdx_export")
+        if not os.path.exists(spdx_public_path):
+            os.makedirs(spdx_public_path, exist_ok=True)
+
+        spdx_user_path = os.path.join(spdx_public_path, str(user.id))
+        if not os.path.exists(spdx_user_path):
+            os.makedirs(spdx_user_path, exist_ok=True)
+
+        spdx_filepath = os.path.join(spdx_user_path, request_data["filename"])
+        spdxManager.export(spdx_filepath)
+        del spdxManager
+
+        return send_file(spdx_filepath)
+
+
+class HTMLApi(Resource):
+    route = "/html/apis"
+    fields = ["filename"]
+    div_open_html = "<div style='border-left: 1px solid #DDD; padding-left: 10px;'>"
+    div_close_html = "</div>"
+
+    SECTION_HEADING_STYLE = (
+        "font-size:18px;font-weight:700;margin:28px 0 12px;padding:6px 0;"
+        "border-bottom:2px solid {color};color:{color};page-break-after:avoid;"
+        "letter-spacing:.03em;"
+    )
+
+    def get_sw_requirements_html(self, sw_requirements: list = None, dbi: db_orm.DbInterface = None,
+                                 test_run_config_ids: list = None, config={},
+                                 _nested: bool = False) -> tuple[list, str]:
+        if not isinstance(sw_requirements, list):
+            return [], ""
+
+        if not len(sw_requirements):
+            return [], ""
+
+        include_comments = bool_from_string(config.get(EXP_CONF_INCLUDE_COMMENTS, "true"))
+        include_test_specifications = bool_from_string(config.get(EXP_CONF_INCLUDE_TEST_SPECIFICATIONS, "true"))
+        include_test_cases = bool_from_string(config.get(EXP_CONF_INCLUDE_TEST_CASES, "true"))
+
+        test_run_configs = []
+        html = ""
+        if not _nested:
+            heading_style = self.SECTION_HEADING_STYLE.format(color=BORDER_COLOR_SW_REQUIREMENT)
+            html = f"<h2 style='{heading_style}'>Software Requirements</h2>"
+        html += self.div_open_html
+
+        for sw_requirement in sw_requirements:
+            comments = []
+            if include_comments:
+                comments = get_mapping_comments(
+                    dbi=dbi,
+                    relation_id=sw_requirement.get("relation_id", None),
+                    tablename=sw_requirement.get("__tablename__", None)
+                )
+
+            html += sw_requirement_to_html(
+                sw_requirement=sw_requirement[_SR],
+                comments=comments
+            )
+
+            if include_test_specifications:
+                ts_test_run_configs, ts_html = self.get_test_specifications_html(
+                    test_specifications=sw_requirement[_TSs],
+                    dbi=dbi,
+                    test_run_config_ids=test_run_config_ids,
+                    config=config
+                )
+                test_run_configs.extend(ts_test_run_configs)
+                html += ts_html
+
+            if include_test_cases:
+                tc_test_run_configs, tc_html = self.get_test_cases_html(
+                    test_cases=sw_requirement[_TCs],
+                    dbi=dbi,
+                    test_run_config_ids=test_run_config_ids,
+                    mapping_to="test_case_mapping_sw_requirement",
+                    config=config
+                )
+                test_run_configs.extend(tc_test_run_configs)
+                html += tc_html
+
+            # Nested Sw Requirements
+            if len(sw_requirement[_SRs]):
+                nested_test_run_configs, nested_html = self.get_sw_requirements_html(
+                    sw_requirements=sw_requirement[_SRs],
+                    dbi=dbi,
+                    test_run_config_ids=test_run_config_ids,
+                    config=config,
+                    _nested=True
+                )
+                test_run_configs.extend(nested_test_run_configs)
+                html += nested_html
+
+        html += self.div_close_html
+        return test_run_configs, html
+
+    def get_test_specifications_html(self, test_specifications: list = None, dbi: db_orm.DbInterface = None,
+                                     test_run_config_ids: list = None, config={}) -> tuple[list, str]:
+        if not isinstance(test_specifications, list):
+            return [], ""
+
+        if not len(test_specifications):
+            return [], ""
+
+        include_comments = bool_from_string(config.get(EXP_CONF_INCLUDE_COMMENTS, "true"))
+        include_test_cases = bool_from_string(config.get(EXP_CONF_INCLUDE_TEST_CASES, "true"))
+
+        test_run_configs = []
+        heading_style = self.SECTION_HEADING_STYLE.format(color=BORDER_COLOR_TEST_SPECIFICATION)
+        html = f"<h2 style='{heading_style}'>Test Specifications</h2>"
+        html += self.div_open_html
+
+        for test_specification in test_specifications:
+            comments = []
+            if include_comments:
+                comments = get_mapping_comments(
+                    dbi=dbi,
+                    relation_id=test_specification.get("relation_id", None),
+                    tablename=test_specification.get("__tablename__", None)
+                )
+
+            html += test_specification_to_html(
+                test_specification=test_specification[_TS],
+                comments=comments
+            )
+
+            if include_test_cases:
+                # Test Cases
+                if len(test_specification[_TS][_TCs]):
+                    test_run_configs, test_cases_html = self.get_test_cases_html(
+                        test_cases=test_specification[_TS][_TCs],
+                        dbi=dbi,
+                        test_run_config_ids=test_run_config_ids,
+                        mapping_to="test_case_mapping_test_specification",
+                        config=config
+                    )
+                    html += test_cases_html
+
+        html += self.div_close_html
+        return test_run_configs, html
+
+    def get_test_cases_html(self, test_cases: list = None, dbi: db_orm.DbInterface = None,
+                            test_run_config_ids: list = None, mapping_to: str = None, config={}) -> tuple[list, str]:
+        if not isinstance(test_cases, list):
+            return [], ""
+
+        if not len(test_cases):
+            return [], ""
+
+        include_comments = bool_from_string(config.get(EXP_CONF_INCLUDE_COMMENTS, "true"))
+        include_test_runs = bool_from_string(config.get(EXP_CONF_INCLUDE_TEST_RUNS, "true"))
+
+        test_run_configs = []
+        heading_style = self.SECTION_HEADING_STYLE.format(color=BORDER_COLOR_TEST_CASE)
+        html = f"<h2 style='{heading_style}'>Test Cases</h2>"
+        html += self.div_open_html
+
+        for test_case in test_cases:
+            comments = []
+            if include_comments:
+                comments = get_mapping_comments(
+                    dbi=dbi,
+                    relation_id=test_case.get("relation_id", None),
+                    tablename=test_case.get("__tablename__", None)
+                )
+
+            html += test_case_to_html(
+                test_case=test_case[_TC],
+                comments=comments
+            )
+
+            # Test Runs
+            if include_test_runs:
+                test_runs_query = (
+                    dbi.session.query(TestRunModel)
+                    .filter(TestRunModel.mapping_to == mapping_to)
+                    .filter(TestRunModel.mapping_id == test_case["relation_id"])
+
+                )
+                if test_run_config_ids:
+                    test_runs_query = test_runs_query.filter(TestRunModel.test_run_config_id.in_(test_run_config_ids))
+                test_runs = (
+                    test_runs_query.order_by(TestRunModel.test_run_config_id.desc(), TestRunModel.id.asc()).all()
+                )
+
+                if test_runs:
+                    html += self.div_open_html
+                    for test_run in test_runs:
+                        test_run_configs.append(test_run.as_dict().get("config", {}))
+                        html += test_run_to_html(test_run.as_dict(full_data=True))
+                    html += self.div_close_html
+
+        html += self.div_close_html
+        return test_run_configs, html
+
+    def get_test_run_configs_html(self, test_run_configs: list = None) -> str:
+        if not isinstance(test_run_configs, list):
+            return ""
+
+        if not len(test_run_configs):
+            return ""
+
+        html = "<div id='test-run-configs'>"
+        html += "<h2>Test Run Configurations</h2>"
+
+        for test_run_config in test_run_configs:
+            html += test_run_config_to_html(test_run_config)
+
+        html += self.div_close_html
+        return html
+
+    def get_documents_html(self, documents: list = None, dbi: db_orm.DbInterface = None,
+                           config={}, _nested: bool = False) -> str:
+        if not isinstance(documents, list):
+            return ""
+
+        if not len(documents):
+            return ""
+
+        include_comments = bool_from_string(config.get(EXP_CONF_INCLUDE_COMMENTS, "true"))
+
+        html = ""
+        if not _nested:
+            heading_style = self.SECTION_HEADING_STYLE.format(color=BORDER_COLOR_DOCUMENT)
+            html = f"<h2 style='{heading_style}'>Documents</h2>"
+        html += self.div_open_html
+
+        for document in documents:
+            comments = []
+            if include_comments:
+                comments = get_mapping_comments(
+                    dbi=dbi,
+                    relation_id=document.get("relation_id", None),
+                    tablename=document.get("__tablename__", None)
+                )
+
+            html += document_to_html(
+                document=document[_D],
+                comments=comments
+            )
+
+            # Nested Documents
+            if len(document[_Ds]):
+                html += self.get_documents_html(
+                    documents=document[_Ds],
+                    dbi=dbi,
+                    config=config,
+                    _nested=True
+                )
+
+        html += self.div_close_html
+        return html
+
+    def get_justifications_html(self, justifications: list = None, dbi: db_orm.DbInterface = None, config={}) -> str:
+        if not isinstance(justifications, list):
+            return ""
+
+        if not len(justifications):
+            return ""
+
+        heading_style = self.SECTION_HEADING_STYLE.format(color=BORDER_COLOR_JUSTIFICATION)
+        html = f"<h2 style='{heading_style}'>Justifications</h2>"
+        html += self.div_open_html
+
+        include_comments = bool_from_string(config.get(EXP_CONF_INCLUDE_COMMENTS, "true"))
+
+        for justification in justifications:
+            comments = []
+            if include_comments:
+                comments = get_mapping_comments(
+                    dbi=dbi,
+                    relation_id=justification.get("relation_id", None),
+                    tablename=justification.get("__tablename__", None)
+                )
+
+            html += justification_to_html(
+                justification=justification[_J],
+                comments=comments
+            )
+
+        html += self.div_close_html
+        return html
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        """
+        get HTML APIs
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "mapping-view"]
+        mandatory_fields += self.fields
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        include_justifications = bool_from_string(request_data.get(EXP_CONF_INCLUDE_JUSTIFICATIONS, "true"))
+        include_documents = bool_from_string(request_data.get(EXP_CONF_INCLUDE_DOCUMENTS, "true"))
+        include_test_specifications = bool_from_string(request_data.get(EXP_CONF_INCLUDE_TEST_SPECIFICATIONS, "true"))
+        include_test_cases = bool_from_string(request_data.get(EXP_CONF_INCLUDE_TEST_CASES, "true"))
+        include_test_runs = bool_from_string(request_data.get(EXP_CONF_INCLUDE_TEST_RUNS, "true"))
+        include_comments = bool_from_string(request_data.get(EXP_CONF_INCLUDE_COMMENTS, "true"))
+        include_tools = bool_from_string(request_data.get(EXP_CONF_INCLUDE_TOOLS, "true"))
+
+        config = {
+            EXP_CONF_INCLUDE_JUSTIFICATIONS: include_justifications,
+            EXP_CONF_INCLUDE_DOCUMENTS: include_documents,
+            EXP_CONF_INCLUDE_TEST_SPECIFICATIONS: include_test_specifications,
+            EXP_CONF_INCLUDE_TEST_CASES: include_test_cases,
+            EXP_CONF_INCLUDE_TEST_RUNS: include_test_runs,
+            EXP_CONF_INCLUDE_COMMENTS: include_comments,
+            EXP_CONF_INCLUDE_TOOLS: include_tools
+        }
+
+        mapping_view = request_data.get("mapping-view", "").replace("-", "_")
+
+        test_run_configs = []
+        test_run_config_ids = []
+        test_run_config_id = request_data.get("test_run_config_id", None)
+        if test_run_config_id:
+            if isinstance(test_run_config_id, int):
+                test_run_config_ids = [test_run_config_id]
+            elif isinstance(test_run_config_id, list):
+                test_run_config_ids = test_run_config_id
+
+        export_date = datetime.datetime.now().strftime(HTML_EXPORT_DATE_FORMAT)
+
+        html = "<html><head><meta charset='utf-8'><style>" \
+               "html, body {margin: 0; padding: 0; width: 100%;}" \
+               "body {color:#242424;font-size:13px;line-height:1.6;}" \
+               "body > * {max-width: 100% !important;}" \
+               "h1{font-size:28px;margin:0 0 12px;}" \
+               "h2{font-size:20px;margin:24px 0 8px;border-bottom:1px solid #d2d2d2;" \
+               "padding-bottom:4px;page-break-after:avoid;}" \
+               "h3{font-size:16px;margin:16px 0 6px;color:#3c3f42;page-break-after:avoid;}" \
+               "h4{page-break-after:avoid;}" \
+               "table, th, td {vertical-align: top !important;}" \
+               "table{border-collapse:collapse; width:100%;}" \
+               "td{padding:6px 8px;vertical-align:top;}" \
+               ".muted{color:#6a6e73;font-size:12px;}" \
+               "*, .pf-c-label, .code-block, " \
+               ".code-block__content{-webkit-print-color-adjust:exact;print-color-adjust:exact;}" \
+               ".code-block{border:1px solid #d2d2d2;border-radius:3px;background:#f5f5f5;" \
+               "margin:8px 0 16px;page-break-inside:avoid;}" \
+               ".code-block__content{padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas," \
+               "\"Liberation Mono\",\"Courier New\",monospace;font-size:11px;line-height:1.45;color:#151515;" \
+               "overflow-x:auto;white-space:pre;word-break:normal;background:#f5f5f5;margin:0;}" \
+               ".pf-c-label{display:inline-flex;align-items:center;gap:4px;border:1px solid #d2d2d2;" \
+               "border-radius:16px;background:#f5f5f5;color:#151515;font-size:10px;line-height:1.5;" \
+               "margin-bottom:2px;}" \
+               ".pf-c-label__content{padding:1px 6px;font-weight:600;letter-spacing:.03em;}" \
+               ".uppercase{text-transform:uppercase;}" \
+               "#toc{page-break-after:always;break-after:page;}" \
+               "#toc ul{list-style:none;padding-left:16px;}" \
+               "#toc > ul{padding-left:0;}" \
+               "#toc li{margin:3px 0;}" \
+               "#toc a{color:#0066cc;text-decoration:none;}" \
+               "#toc a:hover{text-decoration:underline;}" \
+               "</style></head><body style='font-family: \"Roboto\", \"Helvetica\", \"Arial\", sans-serif;'>"
+        html += api.to_html(exported_on=export_date, exported_by=user.username)
+
+        if mapping_view == "sw_requirements":
+            mapped_sections = get_api_sw_requirements_mapping_sections(dbi, api)
+        elif mapping_view == "test_specifications":
+            mapped_sections = get_api_test_specifications_mapping_sections(dbi, api)
+        elif mapping_view == "test_cases":
+            mapped_sections = get_api_test_cases_mapping_sections(dbi, api)
+        else:
+            api_response.set_message("Invalid mapping view")
+            return api_response.return_bad_request()
+
+        # Build Table of Contents
+        toc_html = "<div id='toc'><h2>Table of Contents</h2><ul>"
+        for i_ms, ms in enumerate(mapped_sections["mapped"]):
+            snippet_num = i_ms + 1
+            toc_html += (
+                f"<li><a href='#reference_document_snippet-{snippet_num}'>"
+                f"Reference document snippet {snippet_num}</a>"
+            )
+            children = []
+            for sr in (ms.get(_SRs) or []):
+                sr_data = sr.get(_SR, {})
+                children.append(
+                    f"<li><a href='#sw_requirement-{sr_data.get('id', '')}'>"
+                    f"{get_safe_str(sr_data.get('title', ''))}</a></li>"
+                )
+            if children:
+                toc_html += "<ul>" + "".join(children) + "</ul>"
+            toc_html += "</li>"
+        toc_html += "</ul></div>"
+        html += toc_html
+
+        for i_mapped_section, mapped_section in enumerate(mapped_sections["mapped"]):
+            anchor = f"reference_document_snippet-{i_mapped_section+1}"
+            html += f"<a name='{anchor}'></a>"
+            html += f"<div id='{anchor}'>"
+            html += f"<h2>Reference document snippet {i_mapped_section+1}</h2>"
+            html += "<div class='code-block'>"
+            html += (
+                f"<pre class='code-block__content'><code>"
+                f"{code_to_html(mapped_section['section'])}"
+                f"</code></pre></div>"
+            )
+            html += "</div>"
+
+            # Sw Requirements
+            sr_test_run_configs, sr_html = self.get_sw_requirements_html(
+                sw_requirements=mapped_section[_SRs],
+                dbi=dbi,
+                test_run_config_ids=test_run_config_ids,
+                config=config
+            )
+            test_run_configs.extend(sr_test_run_configs)
+            html += sr_html
+
+            # Test Specifications
+            if include_test_specifications:
+                ts_test_run_configs, ts_html = self.get_test_specifications_html(
+                    test_specifications=mapped_section[_TSs],
+                    dbi=dbi,
+                    test_run_config_ids=test_run_config_ids,
+                    config=config
+                )
+                test_run_configs.extend(ts_test_run_configs)
+                html += ts_html
+
+            # Test Cases
+            if include_test_cases:
+                tc_test_run_configs, tc_html = self.get_test_cases_html(
+                    test_cases=mapped_section[_TCs],
+                    dbi=dbi,
+                    test_run_config_ids=test_run_config_ids,
+                    mapping_to="test_case_mapping_api",
+                    config=config
+                )
+                test_run_configs.extend(tc_test_run_configs)
+                html += tc_html
+
+            # Documents
+            if include_documents:
+                html += self.get_documents_html(
+                    documents=mapped_section[_Ds],
+                    dbi=dbi,
+                    config=config
+                )
+
+            # Justifications
+            if include_justifications:
+                html += self.get_justifications_html(
+                    justifications=mapped_section[_Js],
+                    dbi=dbi,
+                    config=config
+                )
+
+        # Test Run Configs
+        # Remove duplicates
+        if include_test_runs:
+            unique_test_run_config_ids = [x.get("id", None) for x in test_run_configs if x.get("id", None) is not None]
+            unique_test_run_config_ids = list(set(unique_test_run_config_ids))
+            unique_test_run_configs = (
+                dbi.session.query(TestRunConfigModel)
+                .filter(TestRunConfigModel.id.in_(unique_test_run_config_ids))
+                .all()
+            )
+            unique_test_run_configs = [x.as_dict(full_data=True) for x in unique_test_run_configs]
+            html += self.get_test_run_configs_html(test_run_configs=unique_test_run_configs)
+
+        # Tools
+        if include_tools:
+            html += tools_to_html()
+        html += "</body></html>"
+
+        # Save HTML to file
+        user_html_dir = get_user_html_folder_path(user)
+        html_filepath = os.path.join(user_html_dir, f"{api.id}_{mapping_view}.html")
+        with open(html_filepath, "w") as f:
+            f.write(html)
+
+        ret = {"data": html}
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class HTMLExportDownload(Resource):
+    route = "/html/apis/export-download"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        export HTML API to PDF or HTML
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "mapping-view", "filename", "user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        mapping_view = request_data["mapping-view"]
+        api_id = request_data["api-id"]
+        download_filename = request_data["filename"]
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            api_response.set_message("Unauthorized")
+            return api_response.return_unauthorized()
+
+        # Mapping view is not None, refactor the string
+        mapping_view = mapping_view.replace("-", "_")
+        download_file_basename, download_file_extension = os.path.splitext(download_filename)
+        if download_file_extension not in [".pdf", ".html"]:
+            api_response.set_message(f"Invalid file extension: {download_file_extension}")
+            return api_response.return_bad_request()
+
+        if download_file_extension == ".pdf":
+            user_dir = get_user_pdf_folder_path(user)
+
+            # Read HTML file
+            html_user_dir = get_user_html_folder_path(user)
+            html_filename = f"{api_id}_{mapping_view}.html"
+            html_filepath = os.path.join(html_user_dir, html_filename)
+            if not os.path.exists(html_filepath):
+                api_response.set_message(f"File not found: {html_filepath}")
+                return api_response.return_not_found()
+            with open(html_filepath, "r") as f:
+                html_content = f.read()
+
+            api_obj = dbi.session.query(ApiModel).filter(ApiModel.id == api_id).first()
+            footer_left_text = ""
+            if api_obj:
+                footer_left_text = f"{api_obj.library} - {api_obj.api}"
+
+            try:
+                response_content = convert_to_pdf(
+                    ConvertRequest(
+                        html=html_content,
+                        margin_top_mm=10,
+                        margin_bottom_mm=20,
+                        margin_left_mm=8,
+                        margin_right_mm=8,
+                        page_size="A4",
+                        footer_left=footer_left_text,
+                        footer_right="Page [page] / [toPage]",
+                        footer_font_size=8,
+                        footer_spacing_mm=4,
+                        footer_line=True
+                    )
+                )
+            except Exception as e:
+                api_response.set_message(f"PDF convert error: {e}")
+                return api_response.return_server_error()
+
+            # Save PDF to target location
+            pdf_filepath = os.path.join(user_dir, f"{api_id}_{mapping_view}.pdf")
+
+            with open(pdf_filepath, "wb") as f:
+                f.write(response_content)
+        else:
+            user_dir = get_user_html_folder_path(user)
+        export_filename = f"{api_id}_{mapping_view}{download_file_extension}"
+        export_filepath = os.path.join(user_dir, export_filename)
+        if not os.path.exists(export_filepath):
+            api_response.set_message(f"File not found: {export_filepath}")
+            return api_response.return_not_found()
+
+        return send_file(export_filepath, as_attachment=True, download_name=export_filename)
+
+
+@app.route('/spdx/apis/export-download')
+@api_response_decorator
+@check_api_user_read_permission
+def SPDXApiExportDownload(
+    api: ApiModel = None,
+    user: UserModel = None,
+    dbi: db_orm.DbInterface = None,
+    api_response: ApiResponse = None,
+):
+    """
+    Download a file from the user's spdx-export directory
+    """
+    request_data = get_query_string_args(request.args)
+    api_response.set_logger(logger)
+    api_response.set_args(request_data)
+
+    mandatory_fields = ["filename"]
+    wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+    if len(wrong_fields) > 0:
+        api_response.set_missing_fields(wrong_fields)
+        return api_response.return_bad_request_missing_fields()
+
+    # Construct file path
+    filename = request_data["filename"]
+    # Prevent directory traversal: only allow basename (no path separators)
+    if os.path.basename(filename) != filename or any(sep in filename for sep in ('/', '\\')):
+        api_response.set_message("Invalid filename")
+        return api_response.return_forbidden()
+
+    file_path = os.path.join(currentdir, "public", "spdx_export", str(user.id), filename)
+
+    # Security check: ensure the file is within the allowed directory
+    allowed_dir = os.path.join(currentdir, "public", "spdx_export", str(user.id))
+    if not os.path.abspath(file_path).startswith(os.path.abspath(allowed_dir)):
+        api_response.set_message("Access denied - Invalid file path")
+        return api_response.return_forbidden()
+
+    # Check if file exists
+    if not os.path.exists(file_path):
+        return api_response.return_not_found_file()
+
+    # Check if it's a file (not a directory)
+    if not os.path.isfile(file_path):
+        api_response.set_message("Invalid file")
+        return api_response.return_bad_request()
+
+    name, ext = os.path.splitext(file_path)
+    if ext.lower() == '.jsonld':
+        mimetype = 'application/ld+json'
+    elif ext.lower() == '.dot':
+        mimetype = 'text/vnd.graphviz'
+    elif ext.lower() == '.png':
+        mimetype = 'image/png'
+    else:
+        api_response.set_message("Invalid file extension")
+        return api_response.return_bad_request()
+
+    dbi.close()
+
+    # Return the file
+    return send_file(file_path, as_attachment=True, download_name=filename, mimetype=mimetype)
+
+
+class Comment(Resource):
+    route = "/comments"
+    fields = ["api-id", "comment", "parent_table", "parent_id", "user-id", "token"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get comments
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["parent_table", "parent_id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        query = (
+            dbi.session.query(CommentModel)
+            .filter(CommentModel.parent_table == request_data["parent_table"])
+            .filter(CommentModel.parent_id == request_data["parent_id"])
+        )
+
+        if "search" in request_data:
+            query = query.filter(
+                or_(
+                    CommentModel.comment.like(f'%{request_data["search"]}%'),
+                )
+            )
+
+        query = query.order_by(CommentModel.created_at.asc())
+        comments = [c.as_dict() for c in query.all()]
+        api_response.set_data(comments)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        post comment
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields.copy()
+        mandatory_fields.append("todo")
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        parent_table = request_data["parent_table"].strip()
+        parent_id = request_data["parent_id"]
+        comment = request_data["comment"].strip()
+        todo = True if str(request_data["todo"]).strip().lower() in ["true", "1"] else False
+
+        new_comment = CommentModel(parent_table, parent_id, user, comment, todo)
+        dbi.session.add(new_comment)
+
+        dbi.session.commit()
+
+        add_notification = True
+        if parent_table == ApiSwRequirementModel.__tablename__:
+            notification_obj = "Sw Requirement"
+            query = dbi.session.query(ApiSwRequirementModel).filter(ApiSwRequirementModel.id == parent_id)
+            query_obj = "asr"
+        elif parent_table == ApiTestSpecificationModel.__tablename__:
+            notification_obj = "Test Specification"
+            query = dbi.session.query(ApiTestSpecificationModel).filter(ApiTestSpecificationModel.id == parent_id)
+            query_obj = "atc"
+        elif parent_table == ApiTestCaseModel.__tablename__:
+            notification_obj = "Test Case"
+            query = dbi.session.query(ApiTestCaseModel).filter(ApiTestCaseModel.id == parent_id)
+            query_obj = "ats"
+        elif parent_table == ApiJustificationModel.__tablename__:
+            notification_obj = "Justification"
+            query = dbi.session.query(ApiJustificationModel).filter(ApiJustificationModel.id == parent_id)
+            query_obj = "aj"
+        else:
+            add_notification = False
+
+        if add_notification:
+            try:
+                mapping = query.one()
+            except NoResultFound:
+                add_notification = False
+
+        # Add Notifications
+        if add_notification:
+            if todo:
+                notification_type = "Todo"
+            else:
+                notification_type = "Comment"
+
+            notification = (
+                f"{user.username} added a {notification_type} to {notification_obj} "
+                f"mapped to "
+                f"{mapping.api.api} as part of the library {mapping.api.library}"
+            )
+            notifications = NotificationModel(
+                mapping.api,
+                NOTIFICATION_CATEGORY_NEW,
+                f"New {notification_type} from {user.username}",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{mapping.api.id}?{query_obj}={parent_id}&view=comments",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+
+        api_response.set_data(new_comment.as_dict())
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        put comment
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields.copy()
+        mandatory_fields.append("comment_id")
+        mandatory_fields.append("todo")
+        mandatory_fields.append("done")
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        parent_table = request_data["parent_table"].strip()
+        parent_id = request_data["parent_id"]
+        comment_id = request_data["comment_id"]
+        new_comment = request_data["comment"].strip()
+        todo = True if str(request_data["todo"]).strip().lower() in ["true", "1"] else False
+        done = False
+
+        if todo:
+            done = True if str(request_data["done"]).strip().lower() in ["true", "1"] else False
+
+        if done:
+            done_by_id = request_data["user-id"]
+            done_at = datetime.datetime.now()
+        else:
+            done_by_id = None
+            done_at = None
+
+        try:
+            comment_model = (
+                dbi.session.query(CommentModel)
+                .filter(CommentModel.id == comment_id)
+                .filter(CommentModel.parent_table == parent_table)
+                .filter(CommentModel.parent_id == parent_id)
+                .filter(CommentModel.created_by_id == user.id)
+                .one()
+            )
+        except NoResultFound:
+            return api_response.return_not_found_comment()
+
+        comment_model.comment = new_comment
+        comment_model.todo = todo
+        comment_model.done = done
+        comment_model.done_by_id = done_by_id
+        comment_model.done_at = done_at
+        dbi.session.commit()
+
+        api_response.set_data(comment_model.as_dict())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete comment
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields.copy()
+        mandatory_fields.append("comment_id")
+        mandatory_fields.remove("comment")
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        parent_table = request_data["parent_table"].strip()
+        parent_id = request_data["parent_id"]
+        comment_id = request_data["comment_id"]
+
+        try:
+            comment_model = (
+                dbi.session.query(CommentModel)
+                .filter(CommentModel.id == comment_id)
+                .filter(CommentModel.parent_table == parent_table)
+                .filter(CommentModel.parent_id == parent_id)
+                .filter(CommentModel.created_by_id == user.id)
+                .one()
+            )
+        except NoResultFound:
+            return api_response.return_not_found_comment()
+
+        dbi.session.delete(comment_model)
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class CheckSpecification(Resource):
+    route = "/apis/check-specification"
+    fields = ["id"]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        check specification
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        query = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["id"])
+        apis = query.all()
+
+        if len(apis) != 1:
+            return api_response.return_not_found_sw_component()
+
+        api = apis[0]
+
+        if "url" in request_data.keys():
+            spec = get_api_specification(request_data["url"])
+        else:
+            spec = get_api_specification(api.raw_specification_url)
+
+        ret = check_direct_work_items_against_another_spec_file(dbi.session, spec, api)
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class Document(Resource):
+    route = "/documents"
+    fields = get_model_editable_fields(DocumentModel, False)
+    fields_hashes = [x.replace("_", "-") for x in fields]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get documents
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        dbi = get_db()
+        query = dbi.session.query(DocumentModel)
+        query = filter_query(query, request_data, DocumentModel, False)
+        docs = [doc.as_dict(db_session=dbi.session) for doc in query.all()]
+        api_response.set_data(docs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["id", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # Document
+        document = dbi.session.query(DocumentModel).filter(DocumentModel.id == request_data["id"]).one()
+        if not document:
+            return api_response.return_not_found()
+
+        if document.is_used(dbi.session):
+            api_response.set_message("Document is used and cannot be deleted")
+            return api_response.return_bad_request()
+
+        dbi.session.delete(document)
+        dbi.session.commit()
+        return api_response.return_ok()
+
+
+class RemoteDocument(Resource):
+    route = "/remote-documents"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get remote documents
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {}
+        if "id" not in request_data.keys() and "url" not in request_data.keys():
+            api_response.set_data({})
+            return api_response.return_ok()
+
+        if "url" in request_data.keys():
+            ret = {
+                "url": request_data["url"],
+                "valid": None,
+                "content": get_api_specification(request_data["url"]),
+            }  # not evaluated
+        elif "id" in request_data.keys():
+            try:
+                document = dbi.session.query(DocumentModel).filter(DocumentModel.id == request_data["id"]).one()
+                content = get_api_specification(document.url)
+                valid = False
+                if content:
+                    valid = content[document.offset: document.offset + len(document.section)] == document.section
+                if int(valid) == 0 and document.valid == 1:
+                    document.valid = int(valid)
+                    dbi.session.add(document)
+
+                    # Add Notifications
+                    notification = (
+                        f"Document {document.title} "
+                        f"mapped to "
+                        f"{api.api} as part of the library {api.library} it is not valid anymore"
+                    )
+                    notifications = NotificationModel(
+                        api,
+                        NOTIFICATION_CATEGORY_EDIT,
+                        f"Document {document.title} it is not valid anymore",
+                        notification,
+                        "",
+                        f"/mapping/{api.id}",
+                    )
+                    dbi.session.add(notifications)
+                    dbi.session.commit()
+
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Document id {request_data['id']}")
+                return api_response.return_not_found()
+            ret = {"id": request_data["id"], "content": content, "valid": valid}
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class FixNewSpecificationWarnings(Resource):
+    route = "/apis/fix-specification-warnings"
+    fields = ["id"]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        query = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["id"])
+        apis = query.all()
+
+        if len(apis) != 1:
+            return api_response.return_not_found_sw_component()
+
+        api = apis[0]
+
+        spec = get_api_specification(api.raw_specification_url)
+
+        analysis = check_direct_work_items_against_another_spec_file(dbi.session, spec, api)
+
+        # ApiSwRequirements
+        for i in range(len(analysis["sw-requirements"]["warning"])):
+            sr_all = (
+                dbi.session.query(ApiSwRequirementModel)
+                .filter(ApiSwRequirementModel.id == analysis["sw-requirements"]["warning"][i]["id"])
+                .all()
+            )
+            if len(sr_all) == 1:
+                sr_all[0].offset = analysis["sw-requirements"]["warning"][i]["new-offset"]
+                dbi.session.commit()
+
+        # ApiTestSpecification
+        for i in range(len(analysis["test-specifications"]["warning"])):
+            ts_all = (
+                dbi.session.query(ApiTestSpecificationModel)
+                .filter(ApiTestSpecificationModel.id == analysis["test-specifications"]["warning"][i]["id"])
+                .all()
+            )
+            if len(ts_all) == 1:
+                ts_all[0].offset = analysis["test-specifications"]["warning"][i]["new-offset"]
+                dbi.session.commit()
+
+        # ApiTestCase
+        for i in range(len(analysis["test-cases"]["warning"])):
+            tc_all = (
+                dbi.session.query(ApiTestCaseModel)
+                .filter(ApiTestCaseModel.id == analysis["test-cases"]["warning"][i]["id"])
+                .all()
+            )
+            if len(tc_all) == 1:
+                tc_all[0].offset = analysis["test-cases"]["warning"][i]["new-offset"]
+                dbi.session.commit()
+
+        # ApiJustification
+        for i in range(len(analysis["justifications"]["warning"])):
+            j_all = (
+                dbi.session.query(ApiJustificationModel)
+                .filter(ApiJustificationModel.id == analysis["justifications"]["warning"][i]["id"])
+                .all()
+            )
+            if len(j_all) == 1:
+                j_all[0].offset = analysis["justifications"]["warning"][i]["new-offset"]
+                dbi.session.commit()
+
+        # ApiDocument
+        for i in range(len(analysis["documents"]["warning"])):
+            doc_all = (
+                dbi.session.query(ApiDocumentModel)
+                .filter(ApiDocumentModel.id == analysis["documents"]["warning"][i]["id"])
+                .all()
+            )
+            if len(doc_all) == 1:
+                doc_all[0].offset = analysis["documents"]["warning"][i]["new-offset"]
+                dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class Api(Resource):
+    route = "/apis"
+    fields = get_model_editable_fields(ApiModel, False)
+    fields.remove("last_coverage")
+    fields_hashes = [x.replace("_", "-") for x in fields]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        Get apis
+        """
+        apis_dict = []
+        args = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(args)
+
+        dbi = get_db()
+
+        # User permission
+        user = get_active_user_from_request(args, dbi.session)
+        if isinstance(user, UserModel):
+            if not user.api_notifications:
+                user_api_notifications = []
+            else:
+                user_api_notifications = user.api_notifications.replace(" ", "").split(",")
+                user_api_notifications = [int(x) for x in user_api_notifications]  # Need list of int
+        else:
+            user_api_notifications = []
+
+        query = dbi.session.query(ApiModel)
+        query = filter_query(query, args, ApiModel, False)
+        query = query.order_by(ApiModel.api, ApiModel.library_version)
+
+        # Pagination
+        page = 1
+        per_page = 10
+        if "page" in args.keys():
+            if str(request.args["page"]).isnumeric():
+                page = max(int(args["page"]), 1)
+                if "per_page" in args.keys():
+                    if per_page in [5, 10, 20, 40, "5", "10", "20", "40"]:
+                        per_page = int(args["per_page"])
+
+        count = query.count()
+        apis = query.offset((page - 1) * per_page).limit(per_page).all()
+        page_count = math.ceil(count / per_page)
+
+        apis_dict = []
+        if len(apis):
+            for iApi in range(len(apis)):
+                api_dict = apis[iApi].as_dict()
+                api_dict["covered"] = api_dict["last_coverage"]
+
+                # Permissions
+                permissions = get_api_user_permissions(apis[iApi], user, dbi.session)
+                api_dict["permissions"] = permissions
+
+                # Write permission request
+                write_permission_request = get_api_user_requested_write_permissions(apis[iApi], user, dbi.session)
+                api_dict["write_permission_request"] = 1 if write_permission_request else 0
+
+                # Write permission inbox notification
+                # For owners that have to assign write permission
+                curr_api_write_permission_requests = get_safe_str(apis[iApi].write_permission_requests)
+                api_dict["write_permission_inbox"] = (
+                    1 if curr_api_write_permission_requests != "" and "m" in permissions else 0
+                )
+
+                apis_dict.append(api_dict)
+
+            # Filter api based on read permission
+            apis_dict = [api_dict for api_dict in apis_dict if "r" in api_dict["permissions"]]
+
+            # Populate user notifications settings
+            for i in range(len(apis_dict)):
+                if apis_dict[i]["id"] in user_api_notifications:
+                    apis_dict[i]["notifications"] = 1
+                else:
+                    apis_dict[i]["notifications"] = 0
+
+        ret = {
+            "apis": sorted(apis_dict, key=lambda api: (api["api"], api["library_version"])),
+            "current_page": page,
+            "page_count": page_count,
+            "per_page": per_page,
+            "count": count,
+        }
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        api_response.set_logger(logger)
+        api_response.set_args(request.get_json(force=True))
+
+        request_data = request.get_json(force=True)
+        post_fields = self.fields_hashes.copy()
+        post_fields.append("action")
+        post_fields.remove("default-view")
+        wrong_fields = get_wrong_mandatory_fields(post_fields, request_data)
+
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # Find api
+        api = (
+            dbi.session.query(ApiModel)
+            .filter(ApiModel.api == request_data["api"])
+            .filter(ApiModel.library == request_data["library"])
+            .filter(ApiModel.library_version == request_data["library-version"])
+            .all()
+        )
+
+        if len(api) > 0:
+            api_response.set_message("Api is already in the db for the selected library")
+            return api_response.return_conflict()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        if request_data["action"] == "fork":
+            source_api = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["api-id"]).all()
+            if len(source_api) != 1:
+                return api_response.return_not_found_api()
+            if source_api[0].api != request_data["api"]:
+                api_response.set_message("New Api name differ from the original one")
+                return api_response.return_conflict()
+            if source_api[0].library != request_data["library"]:
+                api_response.set_message("New Api library differ from the original one")
+                return api_response.return_conflict()
+
+        file_from_row = parse_int(request_data.get("implementation-file-from-row", ""))
+        file_to_row = parse_int(request_data.get("implementation-file-to-row", ""))
+
+        # Validate fields constraints
+        filed_constraints = ApiModel.get_field_constraints()
+        for field, constraint in filed_constraints.items():
+            if "max_length" in constraint and field in request_data:
+                if constraint["max_length"] is not None and len(request_data[field]) > constraint["max_length"]:
+                    api_response.set_message(f"{field} must be less than {constraint['max_length']} characters")
+                    return api_response.return_bad_request()
+
+        new_api = ApiModel(
+            request_data["api"],
+            request_data["library"],
+            request_data["library-version"],
+            request_data["raw-specification-url"],
+            request_data["category"],
+            "",  # Checksum
+            request_data["implementation-file"],
+            file_from_row,
+            file_to_row,
+            request_data["tags"],
+            user,
+        )
+
+        dbi.session.add(new_api)
+        dbi.session.commit()  # TO have the id of the new api
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added the sw component " f"{new_api.api} as part of the library {new_api.library}"
+        )
+        notifications = NotificationModel(
+            new_api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{new_api.api} has been created",
+            notification,
+            f"[{user.id}]",
+            f"/?currentLibrary={new_api.library}",
+        )
+        dbi.session.add(notifications)
+
+        if request_data["action"] == "fork":
+            dbi.session.commit()  # to read the id
+
+            # Clone ApiJustification
+            api_justifications = (
+                dbi.session.query(ApiJustificationModel).filter(ApiJustificationModel.api_id == source_api[0].id).all()
+            )
+            for api_justification in api_justifications:
+                api_justification.fork(new_api, dbi.session)
+
+            # Clone ApiDocument
+            api_documents = (
+                dbi.session.query(ApiDocumentModel).filter(ApiDocumentModel.api_id == source_api[0].id).all()
+            )
+            for api_document in api_documents:
+                api_document.fork(new_api, dbi.session)
+
+            # Clone ApiSwRequirement
+            api_sw_requirements = (
+                dbi.session.query(ApiSwRequirementModel).filter(ApiSwRequirementModel.api_id == source_api[0].id).all()
+            )
+            for api_sw_requirement in api_sw_requirements:
+                api_sw_requirement.fork(new_api, dbi.session)
+
+            # Clone ApiTestSpecification
+            api_test_specifications = (
+                dbi.session.query(ApiTestSpecificationModel)
+                .filter(ApiTestSpecificationModel.api_id == source_api[0].id)
+                .all()
+            )
+            for api_test_specification in api_test_specifications:
+                api_test_specification.fork(new_api, dbi.session)
+
+            # Clone ApiTestCase
+            api_test_cases = (
+                dbi.session.query(ApiTestCaseModel).filter(ApiTestCaseModel.api_id == source_api[0].id).all()
+            )
+            for api_test_case in api_test_cases:
+                api_test_case.fork(new_api, dbi.session)
+
+        dbi.session.commit()
+        api_response.set_data(new_api.as_dict())
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_edit_permission
+    def put(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        put_fields = self.fields_hashes.copy()
+        put_fields.append("api-id")
+        wrong_fields = get_wrong_mandatory_fields(put_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # Check that the new api+library+library_version is not already in the db
+        same_existing_apis = (
+            dbi.session.query(ApiModel)
+            .filter(ApiModel.api == request_data["api"])
+            .filter(ApiModel.library == request_data["library"])
+            .filter(ApiModel.library_version == request_data["library-version"])
+            .filter(ApiModel.id != request_data["api-id"])
+            .all()
+        )
+
+        if len(same_existing_apis) > 0:
+            api_response.set_message("An Api with selected name and library already exist in the db")
+            return api_response.return_conflict()
+
+        api_modified = False
+        for field in self.fields:
+            if field.replace("_", "-") in request_data.keys():
+                if getattr(api, field) != request_data[field.replace("_", "-")]:
+                    api_modified = True
+                    setattr(api, field, request_data[field.replace("_", "-")])
+
+        if api_modified:
+            api.edited_by_id = user.id
+
+            # Add Notifications
+            notification = f"{user.username} modified sw component " f"{api.api} as part of the library {api.library}"
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api} has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/?currentLibrary={api.library}",
+            )
+            dbi.session.add(notifications)
+
+        dbi.session.commit()
+        api_response.set_data(api.as_dict())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_edit_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        api_response.set_logger(logger)
+        api_response.set_args(request.get_json(force=True))
+
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "api", "library", "library-version", "user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # Delete history tables first (bulk delete does not trigger before_delete events,
+        # so history rows would block api deletion due to FK constraints)
+        dbi.session.query(ApiJustificationHistoryModel).filter(
+            ApiJustificationHistoryModel.api_id == api.id
+        ).delete(synchronize_session=False)
+        dbi.session.query(ApiSwRequirementHistoryModel).filter(
+            ApiSwRequirementHistoryModel.api_id == api.id
+        ).delete(synchronize_session=False)
+        dbi.session.query(ApiTestSpecificationHistoryModel).filter(
+            ApiTestSpecificationHistoryModel.api_id == api.id
+        ).delete(synchronize_session=False)
+        dbi.session.query(ApiTestCaseHistoryModel).filter(
+            ApiTestCaseHistoryModel.api_id == api.id
+        ).delete(synchronize_session=False)
+        dbi.session.query(ApiDocumentHistoryModel).filter(
+            ApiDocumentHistoryModel.api_id == api.id
+        ).delete(synchronize_session=False)
+        dbi.session.query(ApiHistoryModel).filter(ApiHistoryModel.id == api.id).delete(
+            synchronize_session=False
+        )
+
+        dbi.session.query(ApiJustificationModel).filter(ApiJustificationModel.api_id == api.id).delete()
+        dbi.session.query(ApiSwRequirementModel).filter(ApiSwRequirementModel.api_id == api.id).delete()
+        dbi.session.query(ApiTestSpecificationModel).filter(ApiTestSpecificationModel.api_id == api.id).delete()
+        dbi.session.query(ApiTestCaseModel).filter(ApiTestCaseModel.api_id == api.id).delete()
+        dbi.session.query(ApiDocumentModel).filter(ApiDocumentModel.api_id == api.id).delete()
+        dbi.session.query(NotificationModel).filter(NotificationModel.api_id == api.id).delete()
+
+        # Add Notifications
+        notification = f"{user.username} deleted sw component " f"{api.api} as part of the library {api.library}"
+        notifications = NotificationModel(
+            None,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api} has been deleted",
+            notification,
+            f"[{user.id}]",
+            "",
+        )
+        dbi.session.add(notifications)
+        dbi.session.delete(api)
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class ApiWritePermissionRequest(Resource):
+    route = "/apis/write-permission-request"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def put(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        """
+        Update api write permission request field
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        put_fields = ["api-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(put_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # Guest not logged in cannot request write permission as we need an entry in the user table
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            api_response.set_message("User role does not have write permissions")
+            return api_response.return_unauthorized()
+
+        # Permissions
+        permissions = get_api_user_permissions(api, user, dbi.session)
+
+        if "w" in permissions:
+            api_response.set_message("User already has write permission")
+            return api_response.return_conflict()
+
+        write_permission_request = get_api_user_requested_write_permissions(api, user, dbi)
+        if write_permission_request:
+            api_response.set_message("User already requested write permission")
+            return api_response.return_conflict()
+        else:
+            api.write_permission_requests += f"[{user.id}]"
+            dbi.session.commit()
+
+            notification_title = f"Write permission request from {user.username}"
+            notification_message = (
+                f"{user.username} requested write permission for {api.api} "
+                f"of library {api.library} version {api.library_version} (ID {api.id})"
+            )
+
+            # Notification only for api owners
+            notification = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_NEW,
+                notification_title,
+                notification_message,
+                f"[{user.id}]",
+                f"/?currentLibrary={api.library}&search={api.api}",
+            )
+            notification.for_owners = 1
+            dbi.session.add(notification)
+            dbi.session.commit()
+
+            # Email Notification for api owners
+            try:
+                manage_permissions = get_safe_str(api.manage_permissions)
+                ownsers_ids = [int(n) for n in re.findall(r'\[(\d+)\]', manage_permissions)]
+                if ownsers_ids:
+                    owners = dbi.session.query(UserModel).filter(UserModel.id.in_(ownsers_ids))
+                    recipient_list = [owner.email for owner in owners]
+
+                    if recipient_list:
+                        email_subject = f"BASIL - {notification_title}"
+                        email_footer = EMAIL_DISCORD_FOOTER_MESSAGE
+                        email_body = notification_message
+
+                        async_email_notification(SETTINGS_FILEPATH,
+                                                 EMAIL_TEMPLATE_PATH,
+                                                 recipient_list,
+                                                 email_subject,
+                                                 email_body,
+                                                 email_footer,
+                                                 True)
+            except Exception as e:
+                api_response.set_message("Unable to send email notification")
+                api_response.set_exception(e)
+                return api_response.return_server_error()
+
+            api_response.set_data(True)
+            return api_response.return_ok()
+
+
+class ApiLastCoverage(Resource):
+    route = "/mapping/api/last-coverage"
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        """
+        edit api last_coverage field
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        edit_field = "last_coverage"
+        put_fields = ["api-id", edit_field.replace("_", "-")]
+
+        wrong_fields = get_wrong_mandatory_fields(put_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        api_modified = False
+        if getattr(api, edit_field) != request_data[edit_field.replace("_", "-")]:
+            api_modified = True
+            setattr(api, edit_field, request_data[edit_field.replace("_", "-")])
+
+        if api_modified:
+            dbi.session.commit()
+
+        api_response.set_data(api.as_dict())
+        return api_response.return_ok()
+
+
+class ApiHistory(Resource):
+    route = "/apis/history"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        """
+        get api history
+        """
+        api_response.set_logger(logger)
+        api_response.set_args(get_query_string_args(request.args))
+
+        _model = ApiModel
+        _model_history = ApiHistoryModel
+        _model_fields = _model.__table__.columns.keys()
+
+        model_versions_query = (
+            dbi.session.query(_model_history)
+            .filter(_model_history.id == api.id)
+            .order_by(_model_history.version.asc())
+        )
+        staging_array = []
+        ret = []
+
+        # object dict
+        for model_version in model_versions_query.all():
+            obj = {
+                "version": model_version.version,
+                "type": "object",
+                "created_at": datetime.datetime.strptime(str(model_version.created_at), HISTORY_DATE_FORMAT),
+            }
+
+            for k in _model_fields:
+                if k not in ["row_id", "version", "last_coverage", "created_at", "updated_at"]:
+                    obj[k] = getattr(model_version, k)
+
+            staging_array.append(obj)
+
+        staging_array = sorted(staging_array, key=lambda d: (d["created_at"]))
+
+        # get version object.mapping equal to 1.1
+        first_found = False
+        first_obj = {}
+        for i in range(len(staging_array)):
+            if staging_array[i]["version"] == 1 and staging_array[i]["type"] == "object":
+                first_obj = staging_array[i]
+                first_found = True
+                break
+
+        if not first_found:
+            api_response.set_data([])
+            return api_response.return_ok()
+
+        ret.append(get_combined_history_object(first_obj, {}, _model_fields, []))
+
+        for i in range(len(staging_array)):
+            last_obj_version = int(ret[-1]["version"].split(".")[0])
+            if staging_array[i]["type"] == "object" and staging_array[i]["version"] > last_obj_version:
+                ret.append(get_combined_history_object(staging_array[i], ret[-1]["mapping"], _model_fields, []))
+
+        ret = get_reduced_history_data(ret, _model_fields, [], dbi.session)
+
+        for i in range(len(ret)):
+            for permission_field in API_PERMISSION_FIELDS:
+                if permission_field in ret[i]["object"].keys():
+                    ret[i]["object"][permission_field] = ", ".join(
+                        get_usernames_from_ids(ret[i]["object"][permission_field], dbi.session)
+                    )
+                if permission_field in ret[i]["mapping"].keys():
+                    ret[i]["mapping"][permission_field] = ", ".join(
+                        get_usernames_from_ids(ret[i]["mapping"][permission_field], dbi.session)
+                    )
+
+        ret = ret[::-1]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class ApiNewVersion(Resource):
+    route = "/apis/new-version"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """Create a new version of a target software component
+        In case the version already exists, the API will return CONFLICT.
+        Otherwise:
+        - Create a new version of the software component
+        - Clone permissions of the software component to the new version
+        - Clone all the work items of the software component to the new version (without the test runs)
+        - Return the new software component object as dictionary
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "new-version", "user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(
+            mandatory_fields, request_data, allow_empty_string=False, int_fields=["api-id", "user-id"]
+        )
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        new_version = request_data["new-version"]
+
+        same_existing_apis = (
+            dbi.session.query(ApiModel)
+            .filter(ApiModel.api == api.api)
+            .filter(ApiModel.library == api.library)
+            .filter(ApiModel.library_version == new_version)
+            .all()
+        )
+        if len(same_existing_apis) > 0:
+            api_response.set_message("An Api with selected name and library already exist in the db")
+            return api_response.return_conflict()
+
+        new_api = ApiModel(
+            api.api,
+            api.library,
+            new_version,
+            api.raw_specification_url,
+            api.category,
+            api.checksum,
+            api.implementation_file,
+            api.implementation_file_from_row,
+            api.implementation_file_to_row,
+            api.tags,
+            user,
+        )
+
+        # Clone permissions
+        new_api.delete_permissions = api.delete_permissions
+        new_api.edit_permissions = api.edit_permissions
+        new_api.manage_permissions = api.manage_permissions
+        new_api.read_denials = api.read_denials
+        new_api.write_permissions = api.write_permissions
+        new_api.write_permission_requests = api.write_permission_requests
+
+        dbi.session.add(new_api)
+        dbi.session.commit()
+
+        # Clone ApiSwRequirements
+        api_sw_requirements = dbi.session.query(ApiSwRequirementModel).filter(
+            ApiSwRequirementModel.api_id == api.id
+        ).all()
+        for api_sw_requirement in api_sw_requirements:
+            api_sw_requirement.fork(new_api, dbi.session)
+
+        # Clone ApiTestSpecifications
+        api_test_specifications = dbi.session.query(ApiTestSpecificationModel).filter(
+            ApiTestSpecificationModel.api_id == api.id
+        ).all()
+        for api_test_specification in api_test_specifications:
+            api_test_specification.fork(new_api, dbi.session)
+
+        # Clone ApiTestCases
+        api_test_cases = dbi.session.query(ApiTestCaseModel).filter(
+            ApiTestCaseModel.api_id == api.id
+        ).all()
+        for api_test_case in api_test_cases:
+            api_test_case.fork(new_api, dbi.session)
+
+        # Clone ApiDocuments
+        api_documents = dbi.session.query(ApiDocumentModel).filter(
+            ApiDocumentModel.api_id == api.id
+        ).all()
+        for api_document in api_documents:
+            api_document.fork(new_api, dbi.session)
+
+        # Clone ApiJustifications
+        api_justifications = dbi.session.query(ApiJustificationModel).filter(
+            ApiJustificationModel.api_id == api.id
+        ).all()
+        for api_justification in api_justifications:
+            api_justification.fork(new_api, dbi.session)
+
+        api_response.set_data(new_api.as_dict())
+        return api_response.return_created()
+
+
+class Library(Resource):
+    route = "/libraries"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get libraries
+        """
+        dbi = get_db()
+        libraries = dbi.session.query(ApiModel.library).distinct().all()
+        ret = sorted([x.library for x in libraries])
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class ApiSpecification(Resource):
+    route = "/api-specifications"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        """
+        get api specification
+        """
+        api_response.set_logger(logger)
+        api_response.set_args(get_query_string_args(request.args))
+
+        spec = get_api_specification(api.raw_specification_url)
+
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        ret = api.as_dict()
+        ret["raw_specification"] = spec
+        ret["permissions"] = permissions
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class ApiTestSpecificationsMapping(Resource):
+    route = "/mapping/api/test-specifications"
+    fields = ["api-id", "test-specification", "section", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get api test specifications mapping
+        """
+        mapping = get_api_test_specifications_mapping_sections(dbi, api)
+        api_response.set_data(mapping)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new api test specification mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        section = request_data["section"]
+        offset = request_data["offset"]
+        coverage = request_data["coverage"]
+
+        if "id" not in request_data["test-specification"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in TestSpecification.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["test-specification"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["test-specification"]["title"]
+            preconditions = request_data["test-specification"]["preconditions"]
+            test_description = request_data["test-specification"]["test-description"]
+            expected_behavior = request_data["test-specification"]["expected-behavior"]
+
+            # Check for existing Test Specification
+            existing_tss = dbi.session.query(TestSpecificationModel).filter(
+                TestSpecificationModel.title == title).filter(
+                    TestSpecificationModel.preconditions == preconditions).filter(
+                        TestSpecificationModel.test_description == test_description).filter(
+                            TestSpecificationModel.expected_behavior == expected_behavior).all()
+            if len(existing_tss):
+                api_response.set_message(
+                    f"Test Specification {existing_tss[0].id} has same content, "
+                    "consider to use the existing one or to edit at least one field"
+                )
+                return api_response.return_conflict()
+
+            new_test_specification = TestSpecificationModel(
+                title, preconditions, test_description, expected_behavior, user
+            )
+            new_test_specification_mapping_api = ApiTestSpecificationModel(
+                api, new_test_specification, section, offset, coverage, user
+            )
+
+            dbi.session.add(new_test_specification)
+            dbi.session.add(new_test_specification_mapping_api)
+
+        else:
+            id = request_data["test-specification"]["id"]
+
+            # Check for existing mapping
+            existing_tss_mapping = dbi.session.query(ApiTestSpecificationModel).filter(
+                ApiTestSpecificationModel.api_id == api.id).filter(
+                    ApiTestSpecificationModel.test_specification_id == id).filter(
+                        ApiTestSpecificationModel.section == section).filter(
+                            ApiTestSpecificationModel.offset == offset).all()
+            if len(existing_tss_mapping):
+                api_response.set_message(f"Test Specification {id} already associated to the selected api")
+                return api_response.return_conflict()
+
+            try:
+                existing_test_specification = (
+                    dbi.session.query(TestSpecificationModel).filter(TestSpecificationModel.id == id).one()
+                )
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Test Specification id {id}")
+                return api_response.return_not_found()
+
+            new_test_specification_mapping_api = ApiTestSpecificationModel(
+                api, existing_test_specification, section, offset, coverage, user
+            )
+            dbi.session.add(new_test_specification_mapping_api)
+
+        dbi.session.commit()  # To have the id
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added Test Specification "
+            f"{new_test_specification_mapping_api.test_specification.id} "
+            f"mapped to "
+            f"{api.api} as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api} - Test Specification mapping " f"{new_test_specification_mapping_api.id} " f"has been added",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(new_test_specification_mapping_api.as_dict())
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update an existing api test specification mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields + ["relation-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            test_specification_mapping_api = (
+                dbi.session.query(ApiTestSpecificationModel)
+                .filter(ApiTestSpecificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Specification mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        test_specification = test_specification_mapping_api.test_specification
+
+        # Update only modified fields
+        modified_ts = False
+        for field in TestSpecification.fields:
+            if field.replace("_", "-") in request_data["test-specification"].keys():
+                if getattr(test_specification, field) != request_data["test-specification"][field.replace("_", "-")]:
+                    modified_ts = True
+                    setattr(test_specification, field, request_data["test-specification"][field.replace("_", "-")])
+
+        if modified_ts:
+            setattr(test_specification, "edited_by_id", user.id)
+
+        modified_tsa = False
+        if test_specification_mapping_api.section != request_data["section"]:
+            modified_tsa = True
+            test_specification_mapping_api.section = request_data["section"]
+
+        if test_specification_mapping_api.offset != request_data["offset"]:
+            modified_tsa = True
+            test_specification_mapping_api.offset = request_data["offset"]
+
+        if test_specification_mapping_api.coverage != int(request_data["coverage"]):
+            modified_tsa = True
+            test_specification_mapping_api.coverage = int(request_data["coverage"])
+
+        if modified_tsa:
+            test_specification_mapping_api.edited_by_id = user.id
+
+        dbi.session.commit()
+
+        if modified_ts or modified_tsa:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified test specification "
+                f"{test_specification_mapping_api.test_specification.title}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api} - Test Specification has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+
+        api_response.set_data(test_specification_mapping_api.as_dict())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete an existing api test specification mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id", "api-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+        # check if api ...
+        try:
+            test_specification_mapping_api = (
+                dbi.session.query(ApiTestSpecificationModel)
+                .filter(ApiTestSpecificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Specification mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        if test_specification_mapping_api.api.id != api.id:
+            api_response.set_message(
+                f"The Test Specification mapping to Api id {request_data['relation-id']} "
+                "is not associated to the requested api"
+            )
+            return api_response.return_bad_request()
+
+        notification_ts_id = test_specification_mapping_api.test_specification.id
+        notification_ts_title = test_specification_mapping_api.test_specification.title
+        dbi.session.delete(test_specification_mapping_api)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = f"{user.username} deleted test specification " f"{notification_ts_id} {notification_ts_title}"
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api} - Test Specification has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+
+        # TODO: Remove work item only user request to do
+        """
+        test_specification = test_specification_mapping_api.test_specification
+
+        if len(dbi.session.query(ApiTestSpecificationModel).filter( \
+                ApiTestSpecificationModel.api_id == api.id).filter( \
+                ApiTestSpecificationModel.test_specification_id == test_specification.id).all()) == 0:
+            dbi.session.delete(test_specification)
+        """
+
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class ApiTestCasesMapping(Resource):
+    route = "/mapping/api/test-cases"
+    fields = ["api-id", "test-case", "section", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get api test cases mapping
+        """
+        mapping = get_api_test_cases_mapping_sections(dbi, api)
+        api_response.set_data(mapping)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new api test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        section = request_data["section"]
+        offset = request_data["offset"]
+        coverage = request_data["coverage"]
+
+        if "id" not in request_data["test-case"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in TestCase.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["test-case"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            repository = request_data["test-case"]["repository"]
+            relative_path = request_data["test-case"]["relative-path"].lstrip(os.path.sep)
+            title = request_data["test-case"]["title"]
+            description = request_data["test-case"]["description"]
+
+            # Check for existing Test Case
+            existing_tcs = dbi.session.query(TestCaseModel).filter(
+                TestCaseModel.title == title).filter(
+                    TestCaseModel.description == description).filter(
+                        TestCaseModel.repository == repository).filter(
+                            TestCaseModel.relative_path == relative_path).all()
+            if len(existing_tcs):
+                api_response.set_message(
+                    f"Test Case {existing_tcs[0].id} has same content, "
+                    "consider to use the exsting one or to edit at least one field"
+                )
+                return api_response.return_conflict()
+
+            test_case_path = os.path.join(repository, relative_path)
+            # In case of local file
+            if test_case_path.startswith(os.path.sep):
+                if not is_safe_local_user_file_path(test_case_path):
+                    api_response.set_message(f"Invalid path: {test_case_path}")
+                    return api_response.return_bad_request()
+
+            new_test_case = TestCaseModel(repository, relative_path, title, description, user)
+
+            new_test_case_mapping_api = ApiTestCaseModel(api, new_test_case, section, offset, coverage, user)
+            dbi.session.add(new_test_case)
+            dbi.session.add(new_test_case_mapping_api)
+        else:
+            id = request_data["test-case"]["id"]
+
+            # Check for existing mapping
+            existing_tcs_mapping = dbi.session.query(ApiTestCaseModel).filter(
+                ApiTestCaseModel.api_id == api.id).filter(
+                    ApiTestCaseModel.test_case_id == id).filter(
+                        ApiTestCaseModel.section == section).filter(
+                            ApiTestCaseModel.offset == offset).all()
+            if len(existing_tcs_mapping):
+                api_response.set_message(f"Test Case {id} already associated to the selected api")
+                return api_response.return_conflict()
+
+            try:
+                existing_test_case = dbi.session.query(TestCaseModel).filter(TestCaseModel.id == id).one()
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Test Case id {id}")
+                return api_response.return_not_found()
+
+            new_test_case_mapping_api = ApiTestCaseModel(api, existing_test_case, section, offset, coverage, user)
+
+            dbi.session.add(new_test_case_mapping_api)
+
+        dbi.session.commit()  # To have the id
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added Test Case {new_test_case_mapping_api.test_case.id} "
+            f"mapped to "
+            f"{api.api} as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api} - Test Case mapping " f"{new_test_case_mapping_api.id} has been added",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        api_response.set_data(new_test_case_mapping_api.as_dict(db_session=dbi.session))
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update an existing api test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            test_case_mapping_api = (
+                dbi.session.query(ApiTestCaseModel).filter(ApiTestCaseModel.id == request_data["relation-id"]).one()
+            )
+            test_case = test_case_mapping_api.test_case
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Update only modified fields
+        modified_tc = False
+        for field in TestCase.fields:
+            if field.replace("_", "-") in request_data["test-case"].keys():
+                if getattr(test_case, field) != request_data["test-case"][field.replace("_", "-")]:
+                    modified_tc = True
+                    setattr(test_case, field, request_data["test-case"][field.replace("_", "-")])
+
+        if modified_tc:
+            test_case_path = os.path.join(
+                test_case.repository,
+                str(test_case.relative_path).lstrip(os.path.sep),
+            )
+            # In case of local file
+            if test_case_path.startswith(os.path.sep):
+                if not is_safe_local_user_file_path(test_case_path):
+                    api_response.set_message(f"Invalid path: {test_case_path}")
+                    return api_response.return_bad_request()
+
+            setattr(test_case, "edited_by_id", user.id)
+
+        modified_tca = False
+        if test_case_mapping_api.section != request_data["section"]:
+            modified_tca = True
+            test_case_mapping_api.section = request_data["section"]
+
+        if test_case_mapping_api.offset != request_data["offset"]:
+            modified_tca = True
+            test_case_mapping_api.offset = request_data["offset"]
+
+        if test_case_mapping_api.coverage != int(request_data["coverage"]):
+            modified_tca = True
+            test_case_mapping_api.coverage = int(request_data["coverage"])
+
+        if modified_tca:
+            test_case_mapping_api.edited_by_id = user.id
+
+        dbi.session.commit()
+
+        if modified_tc or modified_tca:
+            # Add Notifications
+            notification = f"{user.username} modified a test case mapped " f"to {api.api}"
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api} - Test Case has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+
+        api_response.set_data(test_case_mapping_api.as_dict())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete an existing api test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id", "api-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check if api ...
+        try:
+            test_case_mapping_api = (
+                dbi.session.query(ApiTestCaseModel).filter(ApiTestCaseModel.id == request_data["relation-id"]).one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        if test_case_mapping_api.api.id != api.id:
+            api_response.set_message(
+                f"The Test Case mapping to Api id {request_data['relation-id']} "
+                "is not associated to the requested api"
+            )
+            return api_response.return_bad_request()
+
+        notification_tc_id = test_case_mapping_api.test_case.id
+        notification_tc_title = test_case_mapping_api.test_case.title
+        dbi.session.delete(test_case_mapping_api)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = f"{user.username} deleted test case " f"{notification_tc_id} {notification_tc_title}"
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api} - Test Case has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+
+        # TODO: Remove work item only user request to do
+        """
+        test_case = test_case_mapping_api.test_case
+
+        if len(dbi.session.query(ApiTestCaseModel).filter( \
+                ApiTestCaseModel.api_id == api.id).filter( \
+                ApiTestCaseModel.test_case_id == test_case.id).all()) == 0:
+            dbi.session.delete(test_case)
+        """
+
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class MappingHistory(Resource):
+    route = "/mapping/history"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get mapping history
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        dbi = get_db()
+
+        mandatory_fields = ["work_item_type", "mapped_to_type", "relation_id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if request_data["mapped_to_type"] == "api":
+            if request_data["work_item_type"] == "justification":
+                _model = JustificationModel
+                _model_map = ApiJustificationModel
+                _model_map_history = ApiJustificationHistoryModel
+                _model_history = JustificationHistoryModel
+            elif request_data["work_item_type"] == "document":
+                _model = DocumentModel
+                _model_map = ApiDocumentModel
+                _model_map_history = ApiDocumentHistoryModel
+                _model_history = DocumentHistoryModel
+            elif request_data["work_item_type"] == "sw-requirement":
+                _model = SwRequirementModel
+                _model_map = ApiSwRequirementModel
+                _model_map_history = ApiSwRequirementHistoryModel
+                _model_history = SwRequirementHistoryModel
+            elif request_data["work_item_type"] == "test-specification":
+                _model = TestSpecificationModel
+                _model_map = ApiTestSpecificationModel
+                _model_map_history = ApiTestSpecificationHistoryModel
+                _model_history = TestSpecificationHistoryModel
+            elif request_data["work_item_type"] == "test-case":
+                _model = TestCaseModel
+                _model_map = ApiTestCaseModel
+                _model_map_history = ApiTestCaseHistoryModel
+                _model_history = TestCaseHistoryModel
+            else:
+                return []
+
+        elif request_data["mapped_to_type"] == "sw-requirement":
+            if request_data["work_item_type"] == "sw-requirement":
+                _model = SwRequirementModel
+                _model_map = SwRequirementSwRequirementModel
+                _model_map_history = SwRequirementSwRequirementHistoryModel
+                _model_history = SwRequirementHistoryModel
+            elif request_data["work_item_type"] == "test-specification":
+                _model = TestSpecificationModel
+                _model_map = SwRequirementTestSpecificationModel
+                _model_map_history = SwRequirementTestSpecificationHistoryModel
+                _model_history = TestSpecificationHistoryModel
+            elif request_data["work_item_type"] == "test-case":
+                _model = TestCaseModel
+                _model_map = SwRequirementTestCaseModel
+                _model_map_history = SwRequirementTestCaseHistoryModel
+                _model_history = TestCaseHistoryModel
+            else:
+                return []
+
+        elif request_data["mapped_to_type"] == "test-specification":
+            if request_data["work_item_type"] == "test-case":
+                _model = TestCaseModel
+                _model_map = TestSpecificationTestCaseModel
+                _model_map_history = TestSpecificationTestCaseHistoryModel
+                _model_history = TestCaseHistoryModel
+            else:
+                return []
+
+        elif request_data["mapped_to_type"] == "document":
+            if request_data["work_item_type"] == "document":
+                _model = DocumentModel
+                _model_map = DocumentDocumentModel
+                _model_map_history = DocumentDocumentHistoryModel
+                _model_history = DocumentHistoryModel
+
+        else:
+            api_response.set_data([])
+            return api_response.return_ok()
+
+        _model_fields = _model.__table__.columns.keys()
+        _model_map_fields = _model_map.__table__.columns.keys()
+
+        relation_rows = dbi.session.query(_model_map).filter(_model_map.id == request_data["relation_id"]).all()
+        if len(relation_rows) != 1:
+            api_response.set_data([])
+            return api_response.return_ok()
+
+        relation_row = relation_rows[0].as_dict()
+
+        model_versions_query = (
+            dbi.session.query(_model_history)
+            .filter(_model_history.id == relation_row[request_data["work_item_type"].replace("-", "_")]["id"])
+            .order_by(_model_history.version.asc())
+        )
+        model_map_versions_query = (
+            dbi.session.query(_model_map_history)
+            .filter(_model_map_history.id == request_data["relation_id"])
+            .order_by(_model_map_history.version.asc())
+        )
+
+        staging_array = []
+        ret = []
+
+        # object dict
+        for model_version in model_versions_query.all():
+            obj = {
+                "version": model_version.version,
+                "type": "object",
+                "created_at": datetime.datetime.strptime(str(model_version.created_at), HISTORY_DATE_FORMAT),
+            }
+
+            for k in _model_fields:
+                if k not in ["row_id", "version", "created_at", "updated_at"]:
+                    obj[k] = getattr(model_version, k)
+
+            staging_array.append(obj)
+
+        # map dict
+        for model_map_version in model_map_versions_query.all():
+            obj = {
+                "version": model_map_version.version,
+                "type": "mapping",
+                "created_at": datetime.datetime.strptime(str(model_map_version.created_at), HISTORY_DATE_FORMAT),
+            }
+            for k in _model_map_fields:
+                if request_data["work_item_type"] == "justification":
+                    if k not in ["coverage", "created_at", "updated_at"]:
+                        obj[k] = getattr(model_map_version, k)
+                else:
+                    if k not in ["created_at", "updated_at"]:
+                        obj[k] = getattr(model_map_version, k)
+
+            staging_array.append(obj)
+
+        staging_array = sorted(staging_array, key=lambda d: (d["created_at"]))
+
+        # get version object.mapping equal to 1.1
+        first_found = False
+        first_obj = {}
+        first_map = {}
+
+        for i in range(len(staging_array)):
+            if staging_array[i]["version"] == 1 and staging_array[i]["type"] == "object":
+                first_obj = staging_array[i]
+            elif staging_array[i]["version"] == 1 and staging_array[i]["type"] == "mapping":
+                first_map = staging_array[i]
+            if first_map != {} and first_obj != {}:
+                first_found = True
+                break
+
+        if not first_found:
+            api_response.set_data([])
+            return api_response.return_ok()
+
+        ret.append(get_combined_history_object(first_obj, first_map, _model_fields, _model_map_fields))
+
+        for i in range(len(staging_array)):
+            last_obj_version = int(ret[-1]["version"].split(".")[0])
+            last_map_version = int(ret[-1]["version"].split(".")[1])
+            if staging_array[i]["type"] == "object" and staging_array[i]["version"] > last_obj_version:
+                ret.append(
+                    get_combined_history_object(staging_array[i], ret[-1]["mapping"], _model_fields, _model_map_fields)
+                )
+            elif staging_array[i]["type"] == "mapping" and staging_array[i]["version"] > last_map_version:
+                ret.append(
+                    get_combined_history_object(ret[-1]["object"], staging_array[i], _model_fields, _model_map_fields)
+                )
+
+        ret = get_reduced_history_data(ret, _model_fields, _model_map_fields, dbi.session)
+        ret = ret[::-1]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class MappingUsage(Resource):
+    route = "/mapping/usage"
+    fields = ["work_item_type", "id"]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """Return list of api the selected work item is mapped directly against
+        Improvement: Take in consideration also indirect mapping and other
+          work items, like list of Test Specifications where a Test Case
+          is used
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        wi_type = request_data["work_item_type"]
+        wi_id = int(request_data["id"])
+
+        api_ids = []
+
+        # Work items that can be nested under Sw Requirements
+        if wi_type in ["sw-requirement", "test-specification", "test-case"]:
+            api_srs = dbi.session.query(ApiSwRequirementModel).all()
+            for api_sr in api_srs:
+                sr_mapping = get_sw_requirement_children(dbi, api_sr.as_dict(db_session=dbi.session), config={})
+                for work_item in get_indirect_work_items_from_hierichical_mapping(dbi, sr_mapping, wi_type):
+                    if work_item.get("id", None) == wi_id:
+                        api_ids.append(api_sr.api_id)
+
+        # Work items that can be nested under Documents
+        if wi_type in ["document"]:
+            api_docs = dbi.session.query(ApiDocumentModel).all()
+            for api_doc in api_docs:
+                doc_mapping = get_document_children(dbi, api_doc.as_dict(db_session=dbi.session))
+                for work_item in get_indirect_work_items_from_hierichical_mapping(dbi, doc_mapping, wi_type):
+                    if work_item.get("id", None) == wi_id:
+                        api_ids.append(api_doc.api_id)
+
+        # Api
+        if wi_type == "justification":
+            model = ApiJustificationModel
+            api_data = dbi.session.query(model).filter(model.justification_id == wi_id).all()
+            api_ids += [x.api_id for x in api_data]
+        elif wi_type == "document":
+            model = ApiDocumentModel
+            api_data = dbi.session.query(model).filter(model.document_id == wi_id).all()
+            api_ids += [x.api_id for x in api_data]
+        elif wi_type == "sw-requirement":
+            model = ApiSwRequirementModel
+            api_data = dbi.session.query(model).filter(model.sw_requirement_id == wi_id).all()
+            api_ids += [x.api_id for x in api_data]
+        elif wi_type == "test-specification":
+            # Direct
+            model = ApiTestSpecificationModel
+            api_data = dbi.session.query(model).filter(model.test_specification_id == wi_id).all()
+            api_ids += [x.api_id for x in api_data]
+        elif wi_type == "test-case":
+            model = ApiTestCaseModel
+            api_data = dbi.session.query(model).filter(model.test_case_id == wi_id).all()
+            api_ids += [x.api_id for x in api_data]
+
+            # indirect test specification mapping api:
+            model = TestSpecificationTestCaseModel
+            parent_model = ApiTestSpecificationModel
+            ts_api_data = dbi.session.query(model).join(parent_model).filter(model.test_case_id == wi_id).all()
+            api_ids += [x.sw_requirement_mapping_api.api_id for x in ts_api_data]
+
+            # indirect test specification sw requirement:
+            model = TestSpecificationTestCaseModel
+            parent_model = SwRequirementTestSpecificationModel
+            sr_ts_data = dbi.session.query(model).join(parent_model).filter(model.test_case_id == wi_id).all()
+            sr_ts_ids = [x.test_specification_mapping_sw_requirement_id for x in sr_ts_data]
+            model = SwRequirementTestSpecificationModel
+            parent_model = ApiSwRequirementModel
+            sr_api_data = (
+                dbi.session.query(model)
+                .join(parent_model)
+                .filter(model.sw_requirement_mapping_api_id.in_(sr_ts_ids))
+                .all()
+            )
+            api_ids += [x.sw_requirement_mapping_api.api_id for x in sr_api_data]
+
+        apis = dbi.session.query(ApiModel).filter(ApiModel.id.in_(api_ids)).all()
+
+        query_data = {
+            "api": [
+                {"id": x.id, "api": x.api, "library": x.library, "library_version": x.library_version} for x in apis
+            ]
+        }
+
+        api_response.set_data(query_data)
+        return api_response.return_ok()
+
+
+class ApiSpecificationsMapping(Resource):
+    route = "/mapping/api/specifications"
+    fields = ["api-id", "justification", "section", "offset"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get api specifications mapping
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mapped_sections = []
+        unmapped_sections = []
+
+        api_specification = get_api_specification(api.raw_specification_url)
+        if api_specification is None:
+            api_response.set_message("Unable to find the Api Specification")
+            return api_response.return_not_found()
+
+        mapped_sections = [
+            {"section": api_specification, "offset": 0, "coverage": 0, _Ds: [], _TCs: [], _TSs: [], _SRs: [], _Js: []}
+        ]
+
+        ret = {"mapped": mapped_sections, "unmapped": unmapped_sections}
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class ApiDynamicViewMapping(Resource):
+    route = "/mapping/api/dynamic-view"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        Dynamic view: returns full specification + all direct work items
+        deduplicated by work item ID, each with a list of snippet mappings.
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        api_specification = get_api_specification(api.raw_specification_url)
+        if api_specification is None:
+            api_response.set_message("Unable to find the Api Specification")
+            return api_response.return_not_found()
+
+        def _group_mappings(mapping_rows, work_item_key, work_item_id_field):
+            """Group mapping rows by work item ID, collecting snippets."""
+            groups = {}
+            for row in mapping_rows:
+                row_dict = row.as_dict(db_session=dbi.session)
+                current_offset = row_dict["offset"]
+                current_section = row_dict["section"]
+                match = (
+                    api_specification[current_offset: current_offset + len(current_section)]
+                    == current_section
+                )
+                wi_id = row_dict[work_item_key]["id"]
+                snippet = {
+                    "section": row_dict["section"],
+                    "offset": row_dict["offset"],
+                    "relation_id": row_dict["relation_id"],
+                    "coverage": row_dict["coverage"],
+                    "covered": row_dict.get("covered", row_dict["coverage"]),
+                    "match": match,
+                    "__tablename__": row_dict["__tablename__"],
+                }
+                if wi_id not in groups:
+                    groups[wi_id] = {
+                        work_item_key: row_dict[work_item_key],
+                        "snippets": [],
+                        "created_by": row_dict.get("created_by", ""),
+                    }
+                    if "version" in row_dict:
+                        groups[wi_id]["version"] = row_dict["version"]
+                groups[wi_id]["snippets"].append(snippet)
+            return list(groups.values())
+
+        sr_rows = (
+            dbi.session.query(ApiSwRequirementModel)
+            .filter(ApiSwRequirementModel.api_id == api.id)
+            .order_by(ApiSwRequirementModel.offset.asc())
+            .all()
+        )
+        grouped_srs = _group_mappings(sr_rows, _SR, "sw_requirement_id")
+        for sr_group in grouped_srs:
+            for snippet in sr_group["snippets"]:
+                if snippet["match"]:
+                    dummy_srm = {
+                        "relation_id": snippet["relation_id"],
+                        "__tablename__": snippet["__tablename__"],
+                    }
+                    children = get_sw_requirement_children(dbi, dummy_srm)
+                    snippet[_SRs] = children.get(_SRs, [])
+                    snippet[_TSs] = children.get(_TSs, [])
+                    snippet[_TCs] = children.get(_TCs, [])
+
+        ts_rows = (
+            dbi.session.query(ApiTestSpecificationModel)
+            .filter(ApiTestSpecificationModel.api_id == api.id)
+            .order_by(ApiTestSpecificationModel.offset.asc())
+            .all()
+        )
+        grouped_tss = _group_mappings(ts_rows, _TS, "test_specification_id")
+
+        tc_rows = (
+            dbi.session.query(ApiTestCaseModel)
+            .filter(ApiTestCaseModel.api_id == api.id)
+            .order_by(ApiTestCaseModel.offset.asc())
+            .all()
+        )
+        grouped_tcs = _group_mappings(tc_rows, _TC, "test_case_id")
+
+        j_rows = (
+            dbi.session.query(ApiJustificationModel)
+            .filter(ApiJustificationModel.api_id == api.id)
+            .order_by(ApiJustificationModel.offset.asc())
+            .all()
+        )
+        grouped_js = _group_mappings(j_rows, _J, "justification_id")
+
+        doc_rows = (
+            dbi.session.query(ApiDocumentModel)
+            .filter(ApiDocumentModel.api_id == api.id)
+            .order_by(ApiDocumentModel.offset.asc())
+            .all()
+        )
+        grouped_docs = _group_mappings(doc_rows, _D, "document_id")
+        for doc_group in grouped_docs:
+            for snippet in doc_group["snippets"]:
+                if snippet["match"]:
+                    dummy_dm = {
+                        "relation_id": snippet["relation_id"],
+                        "__tablename__": snippet["__tablename__"],
+                    }
+                    children = get_document_children(dbi, dummy_dm)
+                    snippet[_Ds] = children.get(_Ds, [])
+
+        ret = {
+            "specification": api_specification,
+            _SRs: grouped_srs,
+            _TSs: grouped_tss,
+            _TCs: grouped_tcs,
+            _Js: grouped_js,
+            _Ds: grouped_docs,
+        }
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class ApiJustificationsMapping(Resource):
+    route = "/mapping/api/justifications"
+    fields = ["api-id", "justification", "section", "offset", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get api justifications mapping
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # undesired_keys = ['section', 'offset']
+
+        api_specification = get_api_specification(api.raw_specification_url)
+        if api_specification is None:
+            api_response.set_message("Unable to find the Api Specification")
+            return api_response.return_not_found()
+
+        justifications = (
+            dbi.session.query(ApiJustificationModel)
+            .filter(ApiJustificationModel.api_id == api.id)
+            .order_by(ApiJustificationModel.offset.asc())
+            .all()
+        )
+        justifications_mapping = [x.as_dict(db_session=dbi.session) for x in justifications]
+
+        mapping = {_A: api.as_dict(), _Js: justifications_mapping}
+
+        for iType in [_Js]:
+            for iMapping in range(len(mapping[iType])):
+                current_offset = mapping[iType][iMapping]["offset"]
+                current_section = mapping[iType][iMapping]["section"]
+                mapping[iType][iMapping]["match"] = (
+                    api_specification[current_offset: current_offset + len(current_section)] == current_section
+                )
+
+        mapped_sections = get_split_sections(api_specification, mapping, [_J])
+        unmapped_sections = [x for x in mapping[_Js] if not x["match"]]
+
+        unmapped_sections = extend_unmapped_sections_for_auto_fix(unmapped_sections, api_specification)
+
+        ret = {"mapped": mapped_sections, "unmapped": unmapped_sections}
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        section = request_data["section"]
+        offset = request_data["offset"]
+        coverage = request_data["coverage"]
+
+        if "id" not in request_data["justification"].keys():
+            description = request_data["justification"]["description"]
+
+            # Check for existing Justification
+            existing_js = dbi.session.query(JustificationModel).filter(
+                JustificationModel.description == description).all()
+            if len(existing_js):
+                api_response.set_message(
+                    f"Justification {existing_js[0].id} has same content, "
+                    f"consider to use the exsting one or to edit at least one field"
+                )
+                return api_response.return_conflict()
+
+            new_justification = JustificationModel(description, user)
+            new_justification_mapping_api = ApiJustificationModel(
+                api, new_justification, section, offset, coverage, user
+            )
+            dbi.session.add(new_justification)
+            dbi.session.add(new_justification_mapping_api)
+        else:
+            id = request_data["justification"]["id"]
+
+            #  Check for existing mapping
+            existing_js_mapping = dbi.session.query(ApiJustificationModel).filter(
+                ApiJustificationModel.api_id == api.id).filter(
+                    ApiJustificationModel.justification_id == id).filter(
+                        ApiJustificationModel.section == section).filter(
+                            ApiJustificationModel.offset == offset).all()
+            if len(existing_js_mapping):
+                api_response.set_message(
+                    f"Justification {id} already associated to "
+                    "the selected api"
+                )
+                return api_response.return_conflict()
+
+            try:
+                existing_justification = (
+                    dbi.session.query(JustificationModel).filter(JustificationModel.id == id).one()
+                )
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Justification id {id}")
+                return api_response.return_not_found()
+
+            new_justification_mapping_api = ApiJustificationModel(
+                api, existing_justification, section, offset, coverage, user
+            )
+
+            dbi.session.add(new_justification_mapping_api)
+
+        dbi.session.commit()  # TO have the id of the new justification mapping
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added justification {new_justification_mapping_api.justification.id} "
+            f"mapped to "
+            f"{api.api} as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"Justification mapping {new_justification_mapping_api.id} has been added",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+
+        dbi.session.commit()
+        ret = new_justification_mapping_api.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = self.fields + ["relation-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check if api ...
+        try:
+            justification_mapping_api = (
+                dbi.session.query(ApiJustificationModel)
+                .filter(ApiJustificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the Justification mapping id {request_data['relation-id']}")
+            return api_response.return_not_found()
+
+        justification = justification_mapping_api.justification
+
+        # Update only modified fields
+        modified_j = False
+        for field in Justification.fields:
+            if field.replace("_", "-") in request_data["justification"].keys():
+                if getattr(justification, field) != request_data["justification"][field.replace("_", "-")]:
+                    modified_j = True
+                    setattr(justification, field, request_data["justification"][field.replace("_", "-")])
+
+        if modified_j:
+            setattr(justification, "edited_by_id", user.id)
+
+        modified_ja = False
+        if request_data["section"] != justification_mapping_api.section:
+            modified_ja = True
+            justification_mapping_api.section = request_data["section"]
+
+        if request_data["offset"] != justification_mapping_api.offset:
+            modified_ja = True
+            justification_mapping_api.offset = request_data["offset"]
+
+        if request_data["coverage"] != justification_mapping_api.coverage:
+            modified_ja = True
+            justification_mapping_api.coverage = request_data["coverage"]
+
+        if modified_ja:
+            justification_mapping_api.edited_by_id = user.id
+
+        if modified_ja or modified_j:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified justification {justification_mapping_api.justification.id} "
+                f"mapped to "
+                f"{api.api} as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"Justification mapping {justification_mapping_api.id} " f"has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+
+        dbi.session.commit()
+        ret = justification_mapping_api.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["relation-id", "api-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check if api ...
+        justification_mapping_api = (
+            dbi.session.query(ApiJustificationModel)
+            .filter(ApiJustificationModel.id == request_data["relation-id"])
+            .all()
+        )
+
+        if len(justification_mapping_api) != 1:
+            api_response.set_message(f"Justification mapping id {request_data['relation-id']} not found")
+            return api_response.return_precondition_failed()
+
+        justification_mapping_api = justification_mapping_api[0]
+
+        if justification_mapping_api.api.id != api.id:
+            api_response.set_message(
+                f"The Justification mapping to Api id {request_data['relation-id']} "
+                "is not associated to the requested api"
+            )
+            return api_response.return_precondition_failed()
+
+        notification_j_id = justification_mapping_api.justification.id
+        dbi.session.delete(justification_mapping_api)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted justification {notification_j_id} "
+            f"mapped to "
+            f"{api.api} as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            "Justification mapping has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+
+        # TODO: Remove work item only user request to do
+        """
+        justification = justification_mapping_api.justification
+
+        if len(dbi.session.query(ApiJustificationModel).filter( \
+                ApiJustificationModel.api_id == api.id).filter( \
+                ApiJustificationModel.justification_id == justification.id).all()) == 0:
+            dbi.session.delete(justification)
+        """
+
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class ApiDocumentsMapping(Resource):
+    route = "/mapping/api/documents"
+    fields = ["api-id", "coverage", "document", "offset", "section"]
+
+    document_fields = ["description", "document_type", "offset", "section", "spdx_relation", "title", "url"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+            api_response: ApiResponse = None):
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        api_specification = get_api_specification(api.raw_specification_url)
+        if api_specification is None:
+            api_response.set_message("Unable to find the Api Specification")
+            return api_response.return_not_found()
+
+        documents = (
+            dbi.session.query(ApiDocumentModel)
+            .filter(ApiDocumentModel.api_id == api.id)
+            .order_by(ApiDocumentModel.offset.asc())
+            .all()
+        )
+        documents_mapping = [x.as_dict(db_session=dbi.session) for x in documents]
+
+        mapping = {_A: api.as_dict(), _Ds: documents_mapping}
+
+        for iType in [_Ds]:
+            for iMapping in range(len(mapping[iType])):
+                current_offset = mapping[iType][iMapping]["offset"]
+                current_section = mapping[iType][iMapping]["section"]
+                mapping[iType][iMapping]["match"] = (
+                    api_specification[current_offset: current_offset + len(current_section)] == current_section
+                )
+
+        mapped_sections = get_split_sections(api_specification, mapping, [_D])
+        unmapped_sections = [x for x in mapping[_Ds] if not x["match"]]
+
+        unmapped_sections = extend_unmapped_sections_for_auto_fix(unmapped_sections, api_specification)
+
+        ret = {"mapped": mapped_sections, "unmapped": unmapped_sections}
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        mapping_section = request_data["section"]
+        mapping_offset = request_data["offset"]
+        mapping_coverage = request_data["coverage"]
+
+        if "id" not in request_data["document"].keys():
+
+            document_fields_app = [x.replace("_", "-") for x in self.document_fields]
+            wrong_fields = get_wrong_mandatory_fields(document_fields_app, request_data["document"])
+            if len(wrong_fields) > 0:
+                api_response.set_missing_fields(wrong_fields)
+                return api_response.return_bad_request_missing_fields()
+
+            # Validate Document fields constraints
+            filed_constraints = DocumentModel.get_field_constraints()
+            for field, constraint in filed_constraints.items():
+                if "max_length" in constraint and field in request_data["document"]:
+                    if constraint["max_length"] is not None and \
+                       len(request_data["document"][field]) > constraint["max_length"]:
+                        api_response.set_message(f"{field} must be less than {constraint['max_length']} characters")
+                        return api_response.return_bad_request()
+
+            doc_title = request_data["document"]["title"]
+            doc_description = request_data["document"]["description"]
+            doc_type = request_data["document"]["document-type"]
+            doc_spdx_relation = request_data["document"]["spdx-relation"]
+            doc_url = request_data["document"]["url"]
+            doc_section = request_data["document"]["section"]
+            doc_offset = request_data["document"]["offset"]
+            doc_valid = 0  # default 0, it will be evaluated once rendered
+
+            new_document = DocumentModel(
+                doc_title,
+                doc_description,
+                doc_type,
+                doc_spdx_relation,
+                doc_url,
+                doc_section,
+                doc_offset,
+                doc_valid,
+                user,
+            )
+            new_document_mapping_api = ApiDocumentModel(
+                api, new_document, mapping_section, mapping_offset, mapping_coverage, user
+            )
+            dbi.session.add(new_document)
+            dbi.session.add(new_document_mapping_api)
+
+        else:
+            id = request_data["document"]["id"]
+
+            # Check for existing mapping
+            existing_docs_mapping = dbi.session.query(ApiDocumentModel).filter(
+                ApiDocumentModel.api_id == api.id).filter(
+                    ApiDocumentModel.document_id == id).filter(
+                        ApiDocumentModel.section == mapping_section).filter(
+                            ApiDocumentModel.offset == mapping_offset).all()
+            if len(existing_docs_mapping):
+                api_response.set_message(f"Document {id} already associated to the selected api")
+                return api_response.return_conflict()
+
+            try:
+                existing_document = dbi.session.query(DocumentModel).filter(DocumentModel.id == id).one()
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Document id {id}")
+                return api_response.return_not_found()
+
+            new_document_mapping_api = ApiDocumentModel(
+                api, existing_document, mapping_section, mapping_offset, mapping_coverage, user
+            )
+
+            dbi.session.add(new_document_mapping_api)
+        dbi.session.commit()  # TO have the id of the new document mapping
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added document {new_document_mapping_api.document.id} "
+            f"mapped to "
+            f"{api.api} as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"Document mapping {new_document_mapping_api.id} has been added",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+
+        dbi.session.commit()
+        ret = new_document_mapping_api.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = self.fields + ["relation-id"]
+        document_fields = self.document_fields + ["status"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        document_fields_app = [x.replace("_", "-") for x in document_fields]
+        wrong_fields = get_wrong_mandatory_fields(document_fields_app, request_data["document"])
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check if api ...
+        try:
+            document_mapping_api = (
+                dbi.session.query(ApiDocumentModel).filter(ApiDocumentModel.id == request_data["relation-id"]).one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Document mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        document = document_mapping_api.document
+
+        # Update only modified fields
+        modified_d = False
+        request_document_data = get_dict_with_db_format_keys(request_data["document"])
+        for field in document_fields:
+            if field.replace("_", "-") in request_document_data.keys():
+                if getattr(document, field) != request_document_data[field.replace("_", "-")]:
+                    modified_d = True
+                    setattr(document, field, request_document_data[field.replace("_", "-")])
+                    if field == "url":  # move valid to false
+                        setattr(document, "valid", 0)
+
+        if modified_d:
+            setattr(document, "edited_by_id", user.id)
+
+        modified_da = False  # da: document mapping api
+        if request_data["section"] != document_mapping_api.section:
+            modified_da = True
+            document_mapping_api.section = request_data["section"]
+
+        if request_data["offset"] != document_mapping_api.offset:
+            modified_da = True
+            document_mapping_api.offset = request_data["offset"]
+
+        if request_data["coverage"] != document_mapping_api.coverage:
+            modified_da = True
+            document_mapping_api.coverage = request_data["coverage"]
+
+        if modified_da:
+            document_mapping_api.edited_by_id = user.id
+
+        if modified_da or modified_d:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified document {document_mapping_api.document.id} "
+                f"mapped to "
+                f"{api.api} as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"Document mapping {document_mapping_api.id} " f"has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+
+        dbi.session.commit()
+        ret = document_mapping_api.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["relation-id", "api-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check if api ...
+        document_mapping_api = (
+            dbi.session.query(ApiDocumentModel).filter(ApiDocumentModel.id == request_data["relation-id"]).all()
+        )
+
+        if len(document_mapping_api) != 1:
+            api_response.set_message(f"Document mapping id {request_data['relation-id']} not found")
+            return api_response.return_precondition_failed()
+
+        document_mapping_api = document_mapping_api[0]
+
+        if document_mapping_api.api.id != api.id:
+            api_response.set_message(
+                f"The Document mapping to Api id {request_data['relation-id']} "
+                "is not associated to the requested api"
+            )
+            return api_response.return_precondition_failed()
+
+        notification_d_id = document_mapping_api.document.id
+        dbi.session.delete(document_mapping_api)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted document {notification_d_id} "
+            f"mapped to "
+            f"{api.api} as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            "Document mapping has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class ApiSwRequirementsMapping(Resource):
+    route = "/mapping/api/sw-requirements"
+    fields = ["api-id", "sw-requirement", "section", "offset", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get api sw requirements mapping
+        """
+        mapping = get_api_sw_requirements_mapping_sections(dbi, api)
+        api_response.set_data(mapping)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new api sw requirement mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        notification_sr_title = ""
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        section = request_data["section"]
+        coverage = request_data["coverage"]
+        offset = request_data["offset"]
+
+        if "id" not in request_data["sw-requirement"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in SwRequirement.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["sw-requirement"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["sw-requirement"]["title"]
+            description = request_data["sw-requirement"]["description"]
+
+            # Check for existing Software Requirements
+            existing_srs = dbi.session.query(SwRequirementModel).filter(
+                SwRequirementModel.title == title).filter(
+                    SwRequirementModel.description == description).all()
+            if len(existing_srs):
+                api_response.set_message(
+                    f"SW Requirement {existing_srs[0].id} has same content, "
+                    "consider to use the existing one or to edit at least on field"
+                )
+                return api_response.return_conflict()
+
+            new_sw_requirement = SwRequirementModel(title, description, user)
+
+            new_sw_requirement_mapping_api = ApiSwRequirementModel(
+                api, new_sw_requirement, section, offset, coverage, user
+            )
+            notification_sr_title = title
+            dbi.session.add(new_sw_requirement)
+            dbi.session.add(new_sw_requirement_mapping_api)
+
+        else:
+            # Re using existing sw requirement
+            id = request_data["sw-requirement"]["id"]
+
+            # Check for existing mapping
+            existing_srs_mapping = dbi.session.query(ApiSwRequirementModel).filter(
+                ApiSwRequirementModel.api_id == api.id).filter(
+                    ApiSwRequirementModel.sw_requirement_id == id).filter(
+                        ApiSwRequirementModel.section == section).filter(
+                            ApiSwRequirementModel.offset == offset).all()
+            if len(existing_srs_mapping):
+                api_response.set_message(
+                    f"SW Requirement {id} already associated to "
+                    "the selected api"
+                )
+                return api_response.return_conflict()
+
+            try:
+                existing_sw_requirement = (
+                    dbi.session.query(SwRequirementModel).filter(SwRequirementModel.id == id).one()
+                )
+                notification_sr_title = existing_sw_requirement.title
+            except NoResultFound:
+                api_response.set_message(f"SW Requirement {id} not found")
+                return api_response.return_not_found()
+
+            new_sw_requirement_mapping_api = ApiSwRequirementModel(
+                api, existing_sw_requirement, section, offset, coverage, user
+            )
+            dbi.session.add(new_sw_requirement_mapping_api)
+
+        dbi.session.commit()  # To have the id of the new added mapping
+
+        # Add Notifications
+        notification = f"{user.username} created a new sw requirement " \
+                       f"{notification_sr_title} - coverage: {coverage}"
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api} - Sw Requirement has been created",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}?asr={new_sw_requirement_mapping_api.id}&view=details",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+
+        api_response.set_data(new_sw_requirement_mapping_api.as_dict())
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update an existing api sw requirement mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            sw_requirement_mapping_api = (
+                dbi.session.query(ApiSwRequirementModel)
+                .filter(ApiSwRequirementModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Sw Requirement mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        sw_requirement = sw_requirement_mapping_api.sw_requirement
+
+        # Software Requirement: Update only modified fields
+        modified_sr = False
+        for field in SwRequirement.fields:
+            if field.replace("_", "-") in request_data["sw-requirement"].keys():
+                if getattr(sw_requirement, field) != request_data["sw-requirement"][field.replace("_", "-")]:
+                    modified_sr = True
+                    setattr(sw_requirement, field, request_data["sw-requirement"][field.replace("_", "-")])
+
+        if modified_sr:
+            setattr(sw_requirement, "edited_by_id", user.id)
+
+        # Software Requirement Mapping: Update only modified fields
+        modified_srm = False
+        if sw_requirement_mapping_api.section != request_data["section"]:
+            modified_srm = True
+            sw_requirement_mapping_api.section = request_data["section"]
+
+        if sw_requirement_mapping_api.offset != request_data["offset"]:
+            modified_srm = True
+            sw_requirement_mapping_api.offset = request_data["offset"]
+
+        if sw_requirement_mapping_api.coverage != int(request_data["coverage"]):
+            modified_srm = True
+            sw_requirement_mapping_api.coverage = int(request_data["coverage"])
+
+        if modified_srm:
+            sw_requirement_mapping_api.edited_by_id = user.id
+
+        if modified_sr or modified_srm:
+            # Add Notifications
+            notification = f"{user.username} modified sw requirement " f"{sw_requirement.title}"
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api} - Sw Requirement has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}?asr={sw_requirement_mapping_api.id}&view=details",
+            )
+            dbi.session.add(notifications)
+        dbi.session.commit()
+
+        api_response.set_data(sw_requirement_mapping_api.as_dict())
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete an existing api sw requirement mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id", "api-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check if api ...
+        try:
+            sw_requirement_mapping_api = (
+                dbi.session.query(ApiSwRequirementModel)
+                .filter(ApiSwRequirementModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Sw Requirement mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        if sw_requirement_mapping_api.api.id != api.id:
+            api_response.set_message(
+                f"The Sw Requirement mapping to Api id {request_data['relation-id']} "
+                "is not associated to the requested api"
+            )
+            return api_response.return_bad_request()
+
+        notification_sr_id = sw_requirement_mapping_api.sw_requirement.id
+        notification_sr_title = sw_requirement_mapping_api.sw_requirement.title
+        dbi.session.delete(sw_requirement_mapping_api)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = f"{user.username} deleted sw requirement " f"{notification_sr_id} {notification_sr_title}"
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api} - Sw Requirement has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class SwRequirementImport(Resource):
+    route = "/import/sw-requirements"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """Return a list of Requirements from an input file to let the user able
+        to select the ones he want to import
+
+        :return: dictionary with list of requirements under a proper key
+        """
+        request_data = request.get_json(force=True)
+
+        mandatory_fields = ["file_name", "file_content"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        importer = ImportSwRequirements()
+        sw_requirements = importer.extractWorkItems(file_name=request_data["file_name"],
+                                                    file_content=request_data["file_content"])
+        ret = {_SRs: sw_requirements}
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """Create work items in BASIL"""
+        ret = {_SRs: []}
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["file_content", "items"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        importer = ImportSwRequirements()
+        sw_requirements = importer.getFilteredSwRequirementModels(items=request_data["items"],
+                                                                  user=user)
+
+        # Pay attention: we actually doesn't check if the requirement already exists
+        # (if already exists a requirement with same content)
+        if sw_requirements:
+            dbi.session.add_all(sw_requirements)
+            dbi.session.commit()
+            ret = {_SRs: [sr.as_dict() for sr in sw_requirements]}
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class TestCaseGenerateJson(Resource):
+    route = "/import/test-cases-generate-json"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """Scan a remote git repository to export test cases with tmt in
+        a json file to be stored in user folder"""
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["repository", "branch", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+            api_response.set_message(f"User files path {user_files_path} not found")
+            return api_response.return_not_found()
+
+        cmd = [
+            "bash",
+            "tmt_export_json.sh",
+            f"{request_data['repository']}",
+            f"{request_data['branch']}",
+            f"{user_files_path}",
+            "&"
+        ]
+
+        subprocess.Popen(" ".join(cmd),
+                         stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE,
+                         shell=True)
+
+        ret = {
+            "message": (
+                "tmt test import requested. It can take some time, depending on the test repository."
+                " check in the user file secontion."
+            ),
+            "result": "success",
+        }
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+
+class TestCaseImport(Resource):
+    route = "/import/test-cases"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """Read a file from user files and
+        return a list of Test Cases from an input file to let the user able
+        to select the ones he want to import
+
+        :return: dictionary with list of test cases under a proper key
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["file_name", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+            api_response.set_message(f"User files path {user_files_path} not found")
+            return api_response.return_not_found()
+
+        user_filepath = os.path.join(user_files_path, request_data["file_name"])
+        if not os.path.exists(user_filepath):
+            api_response.set_message(f"User file {user_filepath} not found")
+            return api_response.return_not_found()
+
+        f = open(user_filepath, 'r')
+        fc = f.read()
+        f.close()
+
+        try:
+            data = json.loads(fc)
+        except Exception:
+            api_response.set_message("Unable to read the file, not a valid JSON file.")
+            return api_response.return_bad_request()
+
+        json_mandatory_fields = ["repository", "test_cases"]
+        json_test_cases_mandatory_fields = ["description", "name", "summary"]
+
+        for mandatory_field in json_mandatory_fields:
+            if mandatory_field not in data.keys():
+                api_response.set_message(f"Mandatory field {mandatory_field} not found in the file")
+                return api_response.return_precondition_failed()
+
+        test_cases = []
+        for test_case in data["test_cases"]:
+            validated_test_case_content = True
+            for mandatory_field in json_test_cases_mandatory_fields:
+                if mandatory_field not in test_case.keys():
+                    validated_test_case_content = False
+                    break
+            if validated_test_case_content:
+                id = len(test_cases)
+                if "id" in test_case.keys():
+                    if test_case["id"]:
+                        id = test_case["id"]
+                test_cases.append({
+                    "id": id,
+                    "repository": data["repository"],
+                    "relative_path": test_case["name"],
+                    "title": test_case["summary"],
+                    "description": test_case["description"],
+                })
+
+        ret = {_TCs: test_cases}
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """Create work items in BASIL"""
+        ret = {_TCs: []}
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["items"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # Pay attention: we actually doesn't check if the work item already exists
+        # (if already exists a test case with same content)
+        test_cases = []
+        tc_mandatory_keys = ["repository", "relative_path", "title", "description"]
+        for item in request_data["items"]:
+            item_keys = item.keys()
+            item_validated = True
+            for mandatory_key in tc_mandatory_keys:
+                if mandatory_key not in item_keys:
+                    item_validated = False
+                    break
+            if item_validated:
+                tmp = TestCaseModel(repository=item["repository"],
+                                    relative_path=item["relative_path"],
+                                    title=item["title"],
+                                    description=item["description"],
+                                    created_by=user)
+                test_cases.append(tmp)
+
+        if test_cases:
+            dbi.session.add_all(test_cases)
+            dbi.session.commit()
+            ret = {_TCs: [tc.as_dict() for tc in test_cases]}
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class Justification(Resource):
+    route = "/justifications"
+    fields = get_model_editable_fields(JustificationModel, False)
+    fields_hashes = [x.replace("_", "-") for x in fields]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        request_data = get_query_string_args(request.args)
+        dbi = get_db()
+        query = dbi.session.query(JustificationModel)
+        query = filter_query(query, request_data, JustificationModel, False)
+        jus = [ju.as_dict(db_session=dbi.session) for ju in query.all()]
+
+        if "mode" in request_data.keys():
+            if request_data["mode"] == "minimal":
+                minimal_keys = ["id", "description"]
+                jus = [{key: val for key, val in sub.items() if key in minimal_keys} for sub in jus]
+
+        api_response.set_data(jus)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["id", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # Justification
+        justification = dbi.session.query(JustificationModel).filter(JustificationModel.id == request_data["id"]).one()
+        if not justification:
+            return api_response.return_not_found()
+
+        if justification.is_used(dbi.session):
+            api_response.set_message("Justification is used and cannot be deleted")
+            return api_response.return_bad_request()
+
+        dbi.session.delete(justification)
+        dbi.session.commit()
+        return api_response.return_ok()
+
+
+class TestSpecification(Resource):
+    route = "/test-specifications"
+    fields = get_model_editable_fields(TestSpecificationModel, False)
+    fields_hashes = [x.replace("_", "-") for x in fields]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        request_data = get_query_string_args(request.args)
+        dbi = get_db()
+
+        query = dbi.session.query(TestSpecificationModel)
+        query = filter_query(query, request_data, TestSpecificationModel, False)
+        tss = [ts.as_dict(db_session=dbi.session) for ts in query.all()]
+
+        if "mode" in request_data.keys():
+            if request_data["mode"] == "minimal":
+                minimal_keys = ["id", "title"]
+                tss = [{key: val for key, val in sub.items() if key in minimal_keys} for sub in tss]
+
+        api_response.set_data(tss)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["id", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # Test Specification
+        test_specification = dbi.session.query(TestSpecificationModel).filter(
+            TestSpecificationModel.id == request_data["id"]).one()
+        if not test_specification:
+            return api_response.return_not_found()
+
+        if test_specification.is_used(dbi.session):
+            api_response.set_message("Test Specification is used and cannot be deleted")
+            return api_response.return_bad_request()
+
+        dbi.session.delete(test_specification)
+        dbi.session.commit()
+        return api_response.return_ok()
+
+
+class SwRequirement(Resource):
+    route = "/sw-requirements"
+    fields = get_model_editable_fields(SwRequirementModel, False)
+    fields_hashes = [x.replace("_", "-") for x in fields]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get sw requirements
+        """
+        request_data = get_query_string_args(request.args)
+
+        dbi = get_db()
+
+        query = dbi.session.query(SwRequirementModel)
+        query = filter_query(query, request_data, SwRequirementModel, False)
+        srs = [sr.as_dict(db_session=dbi.session) for sr in query.all()]
+
+        if "mode" in request_data.keys():
+            if request_data["mode"] == "minimal":
+                minimal_keys = ["id", "title"]
+                srs = [{key: val for key, val in sub.items() if key in minimal_keys} for sub in srs]
+
+        api_response.set_data(srs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["id", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # Software Requirement
+        sw_requirement = (
+            dbi.session.query(SwRequirementModel).filter(SwRequirementModel.id == request_data["id"]).one()
+        )
+        if not sw_requirement:
+            return api_response.return_not_found()
+
+        if sw_requirement.is_used(dbi.session):
+            api_response.set_message("Software Requirement is used and cannot be deleted")
+            return api_response.return_bad_request()
+
+        dbi.session.delete(sw_requirement)
+        dbi.session.commit()
+        return api_response.return_ok()
+
+
+class TestCase(Resource):
+    route = "/test-cases"
+    fields = get_model_editable_fields(TestCaseModel, False)
+    fields_hashes = [x.replace("_", "-") for x in fields]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get test cases
+        """
+        request_data = get_query_string_args(request.args)
+        dbi = get_db()
+        query = dbi.session.query(TestCaseModel)
+        query = filter_query(query, request_data, TestCaseModel, False)
+        tcs = [tc.as_dict(db_session=dbi.session) for tc in query.all()]
+
+        if "mode" in request_data.keys():
+            if request_data["mode"] == "minimal":
+                minimal_keys = ["id", "title"]
+                tcs = [{key: val for key, val in sub.items() if key in minimal_keys} for sub in tcs]
+
+        api_response.set_data(tcs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["id", "user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Permissions
+        if user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # Test Case
+        test_case = dbi.session.query(TestCaseModel).filter(TestCaseModel.id == request_data["id"]).one()
+        if not test_case:
+            return api_response.return_not_found()
+
+        if test_case.is_used(dbi.session):
+            api_response.set_message("Test Case is used and cannot be deleted")
+            return api_response.return_bad_request()
+
+        dbi.session.delete(test_case)
+        dbi.session.commit()
+        return api_response.return_ok()
+
+
+class TestCaseLocalFileImplementation(Resource):
+    route = "/test-cases/local-file-implementation"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get test case local file implementation
+        """
+        request_data = get_query_string_args(request.args)
+        mandatory_fields = ["test-case-id", "relation-to", "relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+        test_case_id = request_data["test-case-id"]
+
+        # Check the test case is mapped to the selected api
+        if relation_to == "api":
+            try:
+                test_case_mapping = (
+                    dbi.session.query(ApiTestCaseModel)
+                    .filter(ApiTestCaseModel.id == relation_id)
+                    .filter(ApiTestCaseModel.test_case_id == test_case_id)
+                    .filter(ApiTestCaseModel.api_id == api.id)
+                    .one()
+                )
+            except NoResultFound:
+                api_response.set_message(
+                    "Unable to find ApiTestCaseModel entry with "
+                    f"id: {relation_id} and test case id: {test_case_id}"
+                )
+                return api_response.return_not_found()
+        elif relation_to == "sw-requirement":
+            try:
+                test_case_mapping = (
+                    dbi.session.query(SwRequirementTestCaseModel)
+                    .filter(SwRequirementTestCaseModel.id == relation_id)
+                    .filter(SwRequirementTestCaseModel.test_case_id == test_case_id)
+                    .one()
+                )
+            except NoResultFound:
+                api_response.set_message(
+                    "Unable to find SwRequirementTestCaseModel entry with "
+                    f"id: {relation_id} and test case id: {test_case_id}"
+                )
+                return api_response.return_not_found()
+
+            # check the parent api is the expected one
+            parent_api = get_api_from_indirect_sw_requirement_mapping(test_case_mapping, dbi.session)
+            if not isinstance(parent_api, ApiModel):
+                api_response.set_message("Unable to find the Software Requirement parent Api")
+                return api_response.return_not_found_sw_component()
+            if parent_api.id != api.id:
+                api_response.set_message("The Software Requirement parent Api is different from the requested one")
+                return api_response.return_bad_request()
+
+        elif relation_to == "test-specification":
+            try:
+                test_case_mapping = (
+                    dbi.session.query(TestSpecificationTestCaseModel)
+                    .filter(TestSpecificationTestCaseModel.id == relation_id)
+                    .filter(TestSpecificationTestCaseModel.test_case_id == test_case_id)
+                    .one()
+                )
+            except NoResultFound:
+                api_response.set_message(
+                    "Unable to find TestSpecificationTestCaseModel entry with "
+                    f"id: {relation_id} and test case id: {test_case_id}"
+                )
+                return api_response.return_not_found()
+
+            # check the parent api is the expected one
+            # if the test-specification is mapped to an api, check the parent api is the expected one
+            if test_case_mapping.test_specification_mapping_api_id:
+                try:
+                    parent_api = (
+                        dbi.session.query(ApiTestSpecificationModel)
+                        .filter(ApiTestSpecificationModel.id == test_case_mapping.test_specification_mapping_api_id)
+                        .one()
+                    )
+                except NoResultFound:
+                    api_response.set_message("Unable to find the corresponding api from ApiTestSpecificationModel")
+                    return api_response.return_not_found_sw_component()
+                if parent_api.id != api.id:
+                    api_response.set_message("The retrieved ApiTestSpecificationModel is referring to a different api")
+                    return api_response.return_bad_request()
+            # if the test-specification is mapped to a sw-requirement, check the parent api is the expected one
+            elif test_case_mapping.test_specification_mapping_sw_requirement_id:
+                try:
+                    mapping_id = test_case_mapping.test_specification_mapping_sw_requirement_id
+                    ts_sr_mapping = (
+                        dbi.session.query(SwRequirementTestSpecificationModel)
+                        .filter(SwRequirementTestSpecificationModel.id == mapping_id)
+                        .one()
+                    )
+                except NoResultFound:
+                    api_response.set_message("Unable to find the corresponding SwRequirementTestSpecificationModel")
+                    return api_response.return_not_found()
+
+                parent_api = get_api_from_indirect_sw_requirement_mapping(ts_sr_mapping, dbi.session)
+                if not isinstance(parent_api, ApiModel):
+                    api_response.set_message("Unable to find the Software Requirement parent Api")
+                    return api_response.return_not_found_sw_component()
+                if parent_api.id != api.id:
+                    api_response.set_message("The Software Requirement parent Api is different from the requested one")
+                    return api_response.return_bad_request()
+
+        # if repository is a local path, return the file content
+        if test_case_mapping.test_case.repository.startswith("/"):
+            test_case_path = os.path.join(
+                test_case_mapping.test_case.repository, test_case_mapping.test_case.relative_path
+            )
+
+            if not is_safe_local_user_file_path(test_case_path):
+                api_response.set_message("Local path is not valid, possible attempt of traversal")
+                return api_response.return_bad_request()
+
+            file_content = read_file(test_case_path)
+            if not file_content:
+                api_response.set_message(f"The local file {test_case_path} doesn't exists")
+                return api_response.return_not_found()
+            return Response(file_content, mimetype="text/plain; charset=utf-8")
+
+        # in case the file is remote, it is not possible to read it based on repository and releative path
+        # in a way that applies to any web services
+        api_response.set_message(
+            "Unable to retrieve test case content for a remote file using repository "
+            "and relative path"
+        )
+        return api_response.return_bad_request()
+
+
+class SwRequirementSwRequirementsMapping(Resource):
+    route = "/mapping/sw-requirement/sw-requirements"
+    fields = ["sw-requirement", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """ Get the list of nested requirements
+        We can have parent requirement mapped to
+        - an Api Reference Document snippet: relation-to must be 'api'
+        - another Sw Requirement: relation-to must be 'sw-requirement'
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # user mandatory fields are evaluated as part of the check_api_user_read_permission
+        mandatory_fields = ["api-id", "relation-id", "relation-to"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        query = dbi.session.query(SwRequirementSwRequirementModel)
+        if request_data["relation-to"] == "api":
+            query = query.filter(SwRequirementSwRequirementModel.sw_requirement_mapping_api_id
+                                 == request_data["relation-id"])
+        elif request_data["relation-to"] == "sw-requirement":
+            query = query.filter(SwRequirementSwRequirementModel.sw_requirement_mapping_sw_requirement_id
+                                 == request_data["relation-id"])
+        else:
+            api_response.set_message("relation-to value not valid")
+            return api_response.return_bad_request()
+
+        srsrs = [srsr.as_dict(db_session=dbi.session) for srsr in query.all()]
+
+        api_response.set_data(srsrs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new sw requirement sw requirement mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        api_sr = None
+        sr_sr = None
+
+        # user mandatory fields are evaluated as part of the check_api_user_read_permission
+        mandatory_fields = self.fields + ["api-id", "relation-id", "relation-to", "parent-sw-requirement"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if "id" not in request_data["parent-sw-requirement"].keys():
+            api_response.set_message("miss id of parent-sw-requirement")
+            return api_response.return_bad_request()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        # Find SwRequirementSwRequirement
+        if relation_to == "api":
+            relation_to_query = dbi.session.query(ApiSwRequirementModel).filter(
+                ApiSwRequirementModel.id == relation_id
+            ).filter(
+                ApiSwRequirementModel.api_id == api.id
+            )
+            try:
+                api_sr = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+        elif relation_to == "sw-requirement":
+            relation_to_query = dbi.session.query(SwRequirementSwRequirementModel).filter(
+                SwRequirementSwRequirementModel.id == relation_id
+            )
+            try:
+                sr_sr = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+            mapping_api = get_api_from_indirect_sw_requirement_mapping(sr_sr, dbi.session)
+            if not mapping_api:
+                return api_response.return_not_found_sw_component()
+
+            if api.id != mapping_api.id:
+                api_response.set_message("Mapping is not related to the selected api")
+                return api_response.return_bad_request()
+
+        else:
+            api_response.set_message("relation-to value not valid")
+            return api_response.return_bad_request()
+
+        parent_sw_requirement_id = request_data["parent-sw-requirement"]["id"]
+        coverage = request_data["coverage"]
+
+        try:
+            parent_sw_requirement = (
+                dbi.session.query(SwRequirementModel).filter(SwRequirementModel.id == parent_sw_requirement_id).one()
+            )
+        except NoResultFound:
+            api_response.set_message("Sw Requirement not found")
+            return api_response.return_not_found()
+
+        del parent_sw_requirement  # Just need to check it exists
+
+        if "id" not in request_data["sw-requirement"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in SwRequirement.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["sw-requirement"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["sw-requirement"]["title"]
+            description = request_data["sw-requirement"]["description"]
+
+            # Check for existing Sw Requirements
+            existing_srs = dbi.session.query(SwRequirementModel).filter(
+                SwRequirementModel.title == title).filter(
+                    SwRequirementModel.description == description).all()
+            if len(existing_srs):
+                api_response.set_message(
+                    f"Sw Requirement `{existing_srs[0].id}` with same content already exists, "
+                    f"consider to use the existing one or to change at least one field"
+                )
+                return api_response.return_conflict()
+
+            new_sw_requirement = SwRequirementModel(title, description, user)
+
+            new_sw_requirement_mapping_sw_requirement = SwRequirementSwRequirementModel(
+                api_sr, sr_sr, new_sw_requirement, coverage, user
+            )
+
+            dbi.session.add(new_sw_requirement)
+            dbi.session.add(new_sw_requirement_mapping_sw_requirement)
+
+        else:
+            # Map an existing SwRequirement
+            sw_requirement_id = request_data["sw-requirement"]["id"]
+
+            # Check for existing mapping
+            existing_srs_mapping = dbi.session.query(SwRequirementSwRequirementModel).filter(
+                SwRequirementSwRequirementModel.sw_requirement_mapping_api_id == relation_id).filter(
+                    SwRequirementSwRequirementModel.sw_requirement_id == sw_requirement_id).all()
+            if existing_srs_mapping:
+                api_response.set_message(
+                    f"Sw Requirement `{sw_requirement_id}` already "
+                    "associated to the selected Software Requirement"
+                )
+                return api_response.return_conflict()
+
+            try:
+                sw_requirement = (
+                    dbi.session.query(SwRequirementModel).filter(SwRequirementModel.id == sw_requirement_id).one()
+                )
+            except NoResultFound:
+                api_response.set_message("Sw Requirement not found")
+                return api_response.return_not_found()
+
+            new_sw_requirement_mapping_sw_requirement = SwRequirementSwRequirementModel(
+                api_sr, sr_sr, sw_requirement, coverage, user
+            )
+            dbi.session.add(new_sw_requirement_mapping_sw_requirement)
+
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added sw requirement " f"to {api.api} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api}, a sw requirement has been created",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        ret = new_sw_requirement_mapping_sw_requirement.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update a sw requirement sw requirement mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            sr_mapping_sr = (
+                dbi.session.query(SwRequirementSwRequirementModel)
+                .filter(SwRequirementSwRequirementModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message("Sw Requirement mapping not found")
+            return api_response.return_not_found()
+
+        sr = sr_mapping_sr.sw_requirement
+
+        # Update only modified fields
+        modified_sr = False
+        for field in SwRequirement.fields:
+            if field.replace("_", "-") in request_data["sw-requirement"].keys():
+                if getattr(sr, field) != request_data["sw-requirement"][field.replace("_", "-")]:
+                    modified_sr = True
+                    setattr(sr, field, request_data["sw-requirement"][field.replace("_", "-")])
+
+        if modified_sr:
+            setattr(sr, "edited_by_id", user.id)
+
+        modified_srsr = False
+        if sr_mapping_sr.coverage != int(request_data["coverage"]):
+            modified_srsr = True
+            sr_mapping_sr.coverage = int(request_data["coverage"])
+            sr_mapping_sr.edited_by_id = user.id
+
+        ret = sr_mapping_sr.as_dict(db_session=dbi.session)
+        dbi.session.commit()
+
+        if modified_sr or modified_srsr:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified sw requirement "
+                f"from {api.api} mapping as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api}, a sw requirement has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete a sw requirement sw requirement mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check sw_requirement_mapping_sw_requirement
+        try:
+            sr_mapping_sr = (
+                dbi.session.query(SwRequirementSwRequirementModel)
+                .filter(SwRequirementSwRequirementModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message("Sw Requirement mapping not found")
+            return api_response.return_not_found()
+
+        # Check SwRequirementSwRequirementModel refers to the same api defined in api-id
+        if sr_mapping_sr.sw_requirement_mapping_api:
+            try:
+                parent_mapping = dbi.session.query(ApiSwRequirementModel).filter(
+                    ApiSwRequirementModel.id == sr_mapping_sr.sw_requirement_mapping_api_id
+                ).one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+            mapping_api = parent_mapping.api
+        else:
+            mapping_api = get_api_from_indirect_sw_requirement_mapping(sr_mapping_sr, dbi.session)
+
+        if not mapping_api:
+            api_response.set_message("Parent mapping not found")
+            return api_response.return_not_found()
+
+        if mapping_api.id != api.id:
+            api_response.set_message("Wrong api id")
+            return api_response.return_bad_request()
+
+        notification_sr_id = sr_mapping_sr.sw_requirement.id
+        notification_sr_title = sr_mapping_sr.sw_requirement.title
+        dbi.session.delete(sr_mapping_sr)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted sw requirement "
+            f"{notification_sr_id} {notification_sr_title} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api}, a sw requirement has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class SwRequirementTestSpecificationsMapping(Resource):
+    route = "/mapping/sw-requirement/test-specifications"
+    fields = ["api-id", "sw-requirement", "test-specification", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get the list of test specifications mapped to a sw requirement
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_int_fields = ["api-id", "relation-id"]
+        mandatory_fields = ["relation-to"]
+
+        wrong_fields = get_wrong_mandatory_fields(
+                    fields=mandatory_fields,
+                    request=request_data,
+                    allow_empty_string=False,
+                    int_fields=mandatory_int_fields)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        if relation_to == 'api':
+            ret = (
+                dbi.session.query(SwRequirementTestSpecificationModel)
+                .filter(SwRequirementTestSpecificationModel.sw_requirement_mapping_api_id == relation_id).all()
+            )
+        elif relation_to == "sw-requirement":
+            ret = (
+                dbi.session.query(SwRequirementTestSpecificationModel)
+                .filter(
+                    SwRequirementTestSpecificationModel.sw_requirement_mapping_sw_requirement_id == relation_id
+                ).all()
+            )
+        else:
+            api_response.set_message("wrong relation-to")
+            return api_response.return_bad_request()
+        ret = [row.as_dict() for row in ret]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new sw requirement test specification mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        api_sr = None
+        sr_sr = None
+
+        mandatory_fields = self.fields + ["relation-id", "relation-to"]
+        mandatory_int_fields = ["api-id", "relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(
+                fields=mandatory_fields,
+                request=request_data,
+                allow_empty_string=False,
+                int_fields=mandatory_int_fields)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        wrong_fields = get_wrong_mandatory_fields(
+                fields=[],
+                request=request_data["sw-requirement"],
+                allow_empty_string=False,
+                int_fields=["id"])
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        sw_requirement_id = request_data["sw-requirement"]["id"]
+        coverage = request_data["coverage"]
+
+        try:
+            sw_requirement = (
+                dbi.session.query(SwRequirementModel).filter(SwRequirementModel.id == sw_requirement_id).one()
+            )
+        except NoResultFound:
+            api_response.set_message("Sw Requirement not found")
+            return api_response.return_not_found()
+
+        del sw_requirement  # Just need to check it exists
+
+        if relation_to == "api":
+            relation_to_query = dbi.session.query(ApiSwRequirementModel).filter(
+                ApiSwRequirementModel.id == relation_id
+            )
+            try:
+                relation_to_item = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+            api = relation_to_item.api
+        elif relation_to == "sw-requirement":
+            relation_to_query = dbi.session.query(SwRequirementSwRequirementModel).filter(
+                SwRequirementSwRequirementModel.id == relation_id
+            )
+            try:
+                relation_to_item = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+            api = get_api_from_indirect_sw_requirement_mapping(relation_to_item, dbi.session)
+            if not isinstance(api, ApiModel):
+                return api_response.return_not_found_sw_component()
+        else:
+            api_response.set_message("wrong relation-to")
+            return api_response.return_bad_request()
+
+        if relation_to == "api":
+            api_sr = relation_to_item
+            mapping_id_field = "sw_requirement_mapping_api_id"
+        elif relation_to == "sw-requirement":
+            sr_sr = relation_to_item
+            mapping_id_field = "sw_requirement_mapping_sw_requirement_id"
+
+        if "id" not in request_data["test-specification"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in TestSpecification.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["test-specification"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["test-specification"]["title"]
+            preconditions = request_data["test-specification"]["preconditions"]
+            test_description = request_data["test-specification"]["test-description"]
+            expected_behavior = request_data["test-specification"]["expected-behavior"]
+
+            # Check for existing Test Specifications
+            existing_tss = dbi.session.query(TestSpecificationModel).filter(
+                TestSpecificationModel.title == title).filter(
+                TestSpecificationModel.preconditions == preconditions).filter(
+                TestSpecificationModel.test_description == test_description).filter(
+                TestSpecificationModel.expected_behavior == expected_behavior).all()
+            if len(existing_tss) > 0:
+                api_response.set_message(
+                    f"Test Specification `{existing_tss[0].id}` with same content already exists, "
+                    "consider to use the existing one or to change at least one field"
+                )
+                return api_response.return_conflict()
+
+            new_test_specification = TestSpecificationModel(
+                title, preconditions, test_description, expected_behavior, user
+            )
+
+            new_test_specification_mapping_sw_requirement = SwRequirementTestSpecificationModel(
+                api_sr, sr_sr, new_test_specification, coverage, user
+            )
+
+            dbi.session.add(new_test_specification)
+            dbi.session.add(new_test_specification_mapping_sw_requirement)
+
+        else:
+            test_specification_id = request_data["test-specification"]["id"]
+
+            # Check for existing mapping
+            existing_tss_mapping = dbi.session.query(SwRequirementTestSpecificationModel).filter(
+                getattr(SwRequirementTestSpecificationModel, mapping_id_field)
+                == request_data["relation-id"]).filter(
+                SwRequirementTestSpecificationModel.test_specification_id == test_specification_id).all()
+            if existing_tss_mapping:
+                api_response.set_message(
+                    f"Test Specification `{test_specification_id}` already "
+                    "associated to the selected Software Requirement"
+                )
+                return api_response.return_conflict()
+
+            try:
+                test_specification = (
+                    dbi.session.query(TestSpecificationModel)
+                    .filter(TestSpecificationModel.id == test_specification_id)
+                    .one()
+                )
+            except NoResultFound:
+                api_response.set_message("Unable to find the selected Test Specification")
+                return api_response.return_not_found()
+
+            if not isinstance(test_specification, TestSpecificationModel):
+                api_response.set_message("Test Specification not found")
+                return api_response.return_not_found()
+
+            new_test_specification_mapping_sw_requirement = SwRequirementTestSpecificationModel(
+                api_sr, sr_sr, test_specification, coverage, user
+            )
+            dbi.session.add(new_test_specification_mapping_sw_requirement)
+
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added test specification " f"to {api.api} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api}, a test specification has been created",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        ret = new_test_specification_mapping_sw_requirement.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update a sw requirement test specification mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            sw_mapping_ts = (
+                dbi.session.query(SwRequirementTestSpecificationModel)
+                .filter(
+                    SwRequirementTestSpecificationModel.id == request_data["relation-id"]
+                )
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Specification mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        test_specification = sw_mapping_ts.test_specification
+
+        # Update only modified fields
+        modified_ts = False
+        for field in TestSpecification.fields:
+            if field.replace("_", "-") in request_data["test-specification"].keys():
+                if getattr(test_specification, field) != request_data["test-specification"][field.replace("_", "-")]:
+                    modified_ts = True
+                    setattr(test_specification, field, request_data["test-specification"][field.replace("_", "-")])
+
+        if modified_ts:
+            setattr(test_specification, "edited_by_id", user.id)
+
+        modified_srts = False
+        if sw_mapping_ts.coverage != int(request_data["coverage"]):
+            modified_srts = True
+            sw_mapping_ts.coverage = int(request_data["coverage"])
+            sw_mapping_ts.edited_by_id = user.id
+
+        ret = sw_mapping_ts.as_dict(db_session=dbi.session)
+        dbi.session.commit()
+
+        if modified_ts or modified_srts:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified test specification "
+                f"from {api.api} mapping as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api}, a test specification has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete a sw requirement test specification mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            sw_mapping_ts = (
+                dbi.session.query(SwRequirementTestSpecificationModel)
+                .filter(SwRequirementTestSpecificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Specification mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        notification_ts_id = sw_mapping_ts.test_specification.id
+        notification_ts_title = sw_mapping_ts.test_specification.title
+        dbi.session.delete(sw_mapping_ts)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted test specification "
+            f"{notification_ts_id} {notification_ts_title} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api}, a test specification has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class SwRequirementTestCasesMapping(Resource):
+    route = "/mapping/sw-requirement/test-cases"
+    fields = ["api-id", "sw-requirement", "test-case", "coverage"]
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get the list of test cases mapped to a sw requirement
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_int_fields = ["api-id", "relation-id"]
+        mandatory_fields = ["relation-to"]
+        wrong_fields = get_wrong_mandatory_fields(
+            mandatory_fields,
+            request_data,
+            allow_empty_string=False,
+            int_fields=mandatory_int_fields,
+        )
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        if relation_to == 'api':
+            ret = (
+                dbi.session.query(SwRequirementTestCaseModel)
+                .filter(SwRequirementTestCaseModel.sw_requirement_mapping_api_id == relation_id).all()
+            )
+        elif relation_to == "sw-requirement":
+            ret = (
+                dbi.session.query(SwRequirementTestCaseModel)
+                .filter(SwRequirementTestCaseModel.sw_requirement_mapping_sw_requirement_id == relation_id).all()
+            )
+        else:
+            api_response.set_message("wrong relation-to")
+            return api_response.return_bad_request()
+
+        ret = [row.as_dict() for row in ret]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        create a new sw requirement test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        api_sr = None
+        sr_sr = None
+
+        post_mandatory_fields = self.fields + ["relation-id", "relation-to"]
+        wrong_fields = get_wrong_mandatory_fields(post_mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if "id" not in request_data["sw-requirement"].keys():
+            api_response.set_message("miss id of sw-requirement")
+            return api_response.return_bad_request()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Find ApiSwRequirement
+        if relation_to == "api":
+            relation_to_query = dbi.session.query(ApiSwRequirementModel).filter(
+                ApiSwRequirementModel.id == relation_id
+            )
+
+            try:
+                relation_to_item = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+            api = relation_to_item.api
+
+        elif relation_to == "sw-requirement":
+            relation_to_query = dbi.session.query(SwRequirementSwRequirementModel).filter(
+                SwRequirementSwRequirementModel.id == relation_id
+            )
+            try:
+                relation_to_item = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+            api = get_api_from_indirect_sw_requirement_mapping(relation_to_item, dbi.session)
+            if not isinstance(api, ApiModel):
+                return api_response.return_not_found_sw_component()
+        else:
+            api_response.set_message("wrong relation-to")
+            return api_response.return_bad_request()
+
+        # Permissions
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        if relation_to == "api":
+            api_sr = relation_to_item
+            mapping_id_field = "sw_requirement_mapping_api_id"
+        elif relation_to == "sw-requirement":
+            sr_sr = relation_to_item
+            mapping_id_field = "sw_requirement_mapping_sw_requirement_id"
+
+        sw_requirement_id = request_data["sw-requirement"]["id"]
+        coverage = request_data["coverage"]
+
+        try:
+            sw_requirement = (
+                dbi.session.query(SwRequirementModel).filter(SwRequirementModel.id == sw_requirement_id).one()
+            )
+        except NoResultFound:
+            api_response.set_message("Sw Requirement not found")
+            return api_response.return_not_found()
+
+        del sw_requirement  # Just need to check it exists
+
+        if "id" not in request_data["test-case"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in TestCase.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["test-case"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["test-case"]["title"]
+            description = request_data["test-case"]["description"]
+            repository = request_data["test-case"]["repository"]
+            relative_path = request_data["test-case"]["relative-path"]
+
+            #  Check for existing Test Cases
+            existing_tcs = dbi.session.query(TestCaseModel).filter(
+                TestCaseModel.title == title).filter(
+                    TestCaseModel.description == description).filter(
+                        TestCaseModel.repository == repository).filter(
+                            TestCaseModel.relative_path == relative_path).all()
+            if len(existing_tcs):
+                api_response.set_message(
+                    f"Test Case `{existing_tcs[0].id}` has same content, "
+                    "consider to use the existing one or to edit at least one field"
+                )
+                return api_response.return_conflict()
+
+            test_case_path = os.path.join(repository, relative_path)
+            # In case of local file
+            if test_case_path.startswith(os.path.sep):
+                if not is_safe_local_user_file_path(test_case_path):
+                    api_response.set_message(f"Invalid path: {test_case_path}")
+                    return api_response.return_bad_request()
+
+            new_test_case = TestCaseModel(repository, relative_path, title, description, user)
+
+            new_test_case_mapping_sw_requirement = SwRequirementTestCaseModel(
+                api_sr, sr_sr, new_test_case, coverage, user
+            )
+
+            dbi.session.add(new_test_case)
+            dbi.session.add(new_test_case_mapping_sw_requirement)
+
+        else:
+            # Map an existing Test Case
+            test_case_id = request_data["test-case"]["id"]
+
+            # Check for existing mapping
+            existing_tcs_mapping = dbi.session.query(SwRequirementTestCaseModel).filter(
+                getattr(SwRequirementTestCaseModel, mapping_id_field) == relation_id).filter(
+                    SwRequirementTestCaseModel.test_case_id == test_case_id).all()
+            if len(existing_tcs_mapping):
+                api_response.set_message(
+                    f"Test Case `{test_case_id}` already associated "
+                    "to the selected Sw Requirement"
+                )
+                return api_response.return_conflict()
+
+            try:
+                test_case = dbi.session.query(TestCaseModel).filter(TestCaseModel.id == test_case_id).one()
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Test Case id {test_case_id}")
+                return api_response.return_not_found()
+
+            if not isinstance(test_case, TestCaseModel):
+                api_response.set_message("Test Case not found")
+                return api_response.return_not_found()
+
+            new_test_case_mapping_sw_requirement = SwRequirementTestCaseModel(api_sr, sr_sr, test_case, coverage, user)
+            dbi.session.add(new_test_case_mapping_sw_requirement)
+
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = f"{user.username} added test case " f"to {api.api} mapping as part of the library {api.library}"
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api}, a test case has been created",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        ret = new_test_case_mapping_sw_requirement.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        update a sw requirement test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            sw_mapping_tc = (
+                dbi.session.query(SwRequirementTestCaseModel)
+                .filter(SwRequirementTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        api = get_api_from_indirect_sw_requirement_mapping(sw_mapping_tc, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        # Permissions
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        test_case = sw_mapping_tc.test_case
+
+        # Update only modified fields
+        modified_tc = False
+        for field in TestCase.fields:
+            if field.replace("_", "-") in request_data["test-case"].keys():
+                if getattr(test_case, field) != request_data["test-case"][field.replace("_", "-")]:
+                    modified_tc = True
+                    setattr(test_case, field, request_data["test-case"][field.replace("_", "-")])
+
+        if modified_tc:
+            test_case_path = os.path.join(
+                request_data["test-case"]["repository"], request_data["test-case"]["relative-path"]
+            )
+            # In case of local file
+            if test_case_path.startswith(os.path.sep):
+                if not is_safe_local_user_file_path(test_case_path):
+                    api_response.set_message(f"Invalid path: {test_case_path}")
+                    return api_response.return_bad_request()
+            setattr(test_case, "edited_by_id", user.id)
+
+        modified_srtc = False
+        if sw_mapping_tc.coverage != int(request_data["coverage"]):
+            modified_srtc = True
+            sw_mapping_tc.coverage = int(request_data["coverage"])
+            sw_mapping_tc.edited_by_id = user.id
+
+        ret = sw_mapping_tc.as_dict(db_session=dbi.session)
+        dbi.session.commit()
+
+        if modified_tc or modified_srtc:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified test case "
+                f"from {api.api} mapping as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api}, a test case has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            sw_mapping_tc = (
+                dbi.session.query(SwRequirementTestCaseModel)
+                .filter(SwRequirementTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        api = get_api_from_indirect_sw_requirement_mapping(sw_mapping_tc, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        # Permissions
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        # test_case = sw_mapping_tc.test_case
+        # dbi.session.delete(test_case)
+
+        notification_tc_id = sw_mapping_tc.test_case.id
+        notification_tc_title = sw_mapping_tc.test_case.title
+        dbi.session.delete(sw_mapping_tc)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted test case "
+            f"{notification_tc_id} {notification_tc_title} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api}, a test case has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class TestSpecificationTestCasesMapping(Resource):
+    route = "/mapping/test-specification/test-cases"
+    fields = ["api-id", "test-specification", "test-case", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get the list of test cases mapped to a test specification
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_int_fields = ["api-id", "relation-id"]
+        mandatory_fields = ["relation-to"]
+        wrong_fields = get_wrong_mandatory_fields(
+                    fields=mandatory_fields,
+                    request=request_data,
+                    allow_empty_string=False,
+                    int_fields=mandatory_int_fields)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        if relation_to == 'api':
+            ret = (
+                dbi.session.query(TestSpecificationTestCaseModel)
+                .filter(TestSpecificationTestCaseModel.test_specification_mapping_api_id == relation_id).all()
+            )
+        elif relation_to == "sw-requirement":
+            ret = (
+                dbi.session.query(TestSpecificationTestCaseModel)
+                .filter(
+                    TestSpecificationTestCaseModel.test_specification_mapping_sw_requirement_id == relation_id
+                ).all()
+            )
+        else:
+            api_response.set_message("wrong relation-to")
+            return api_response.return_bad_request()
+        ret = [row.as_dict() for row in ret]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new test specification test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        api_ts = None
+        sr_ts = None
+
+        post_mandatory_fields = self.fields + ["relation-id", "relation-to"]
+        wrong_fields = get_wrong_mandatory_fields(post_mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if "id" not in request_data["test-specification"].keys():
+            api_response.set_message("miss id of test-specification")
+            return api_response.return_bad_request()
+
+        relation_id = request_data["relation-id"]
+
+        # Find ApiSwRequirement
+        if request_data["relation-to"] == "api":
+            relation_to_query = dbi.session.query(ApiTestSpecificationModel).filter(
+                ApiTestSpecificationModel.id == relation_id
+            )
+        elif request_data["relation-to"] == "sw-requirement":
+            relation_to_query = dbi.session.query(SwRequirementTestSpecificationModel).filter(
+                SwRequirementTestSpecificationModel.id == relation_id
+            )
+        else:
+            api_response.set_message("wrong relation-to")
+            return api_response.return_bad_request()
+
+        try:
+            relation_to_item = relation_to_query.one()
+        except NoResultFound:
+            api_response.set_message("Parent mapping not found")
+            return api_response.return_not_found()
+
+        if request_data["relation-to"] == "api":
+            api_ts = relation_to_item
+            api = api_ts.api
+            mapping_id_field = "test_specification_mapping_api_id"
+        elif request_data["relation-to"] == "sw-requirement":
+            sr_ts = relation_to_item
+            api = get_api_from_indirect_sw_requirement_mapping(sr_ts, dbi.session)
+            mapping_id_field = "test_specification_mapping_sw_requirement_id"
+
+            if not isinstance(api, ApiModel):
+                return api_response.return_not_found_sw_component()
+
+        test_specification_id = request_data["test-specification"]["id"]
+        coverage = request_data["coverage"]
+
+        try:
+            test_specification = (
+                dbi.session.query(TestSpecificationModel)
+                .filter(TestSpecificationModel.id == test_specification_id)
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message("Test Specification not found")
+            return api_response.return_not_found()
+
+        del test_specification  # Just need to check it exists
+
+        if "id" not in request_data["test-case"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in TestCase.fields if x not in ["status"]]:
+                if check_field.replace("_", "-") not in request_data["test-case"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["test-case"]["title"]
+            description = request_data["test-case"]["description"]
+            repository = request_data["test-case"]["repository"]
+            relative_path = request_data["test-case"]["relative-path"]
+
+            # Check for existing Test Cases
+            existing_tcs = dbi.session.query(TestCaseModel).filter(
+                TestCaseModel.title == title).filter(
+                    TestCaseModel.description == description).filter(
+                        TestCaseModel.repository == repository).filter(
+                            TestCaseModel.relative_path == relative_path).all()
+            if len(existing_tcs):
+                api_response.set_message(
+                    f"Test Case `{existing_tcs[0].id}` has same content, "
+                    "consider to use the existing one or to edit at least one field"
+                )
+                return api_response.return_conflict()
+
+            test_case_path = os.path.join(repository, relative_path)
+            # In case of local file
+            if test_case_path.startswith(os.path.sep):
+                if not is_safe_local_user_file_path(test_case_path):
+                    api_response.set_message(f"Invalid path: {test_case_path}")
+                    return api_response.return_bad_request()
+
+            new_test_case = TestCaseModel(repository, relative_path, title, description, user)
+
+            new_test_case_mapping_test_specification = TestSpecificationTestCaseModel(
+                api_ts, sr_ts, new_test_case, coverage, user
+            )
+
+            dbi.session.add(new_test_case)
+            dbi.session.add(new_test_case_mapping_test_specification)
+
+        else:
+            # Map an existing Test Case
+            test_case_id = request_data["test-case"]["id"]
+
+            # Check for existing mapping
+            existing_tcs_mapping = dbi.session.query(TestSpecificationTestCaseModel).filter(
+                getattr(TestSpecificationTestCaseModel, mapping_id_field) == relation_id).filter(
+                    TestSpecificationTestCaseModel.test_case_id == test_case_id).all()
+            if len(existing_tcs_mapping):
+                api_response.set_message(
+                    f"Test Case `{test_case_id}` already associated "
+                    "to the selected Test Specification"
+                )
+                return api_response.return_conflict()
+
+            try:
+                test_case = dbi.session.query(TestCaseModel).filter(TestCaseModel.id == test_case_id).one()
+            except NoResultFound:
+                api_response.set_message(f"Unable to find the Test Case id {test_case_id}")
+                return api_response.return_not_found()
+
+            if not isinstance(test_case, TestCaseModel):
+                api_response.set_message("Test Case not found")
+                return api_response.return_not_found()
+
+            new_test_case_mapping_test_specification = TestSpecificationTestCaseModel(
+                api_ts, sr_ts, test_case, coverage, user
+            )
+            dbi.session.add(new_test_case_mapping_test_specification)
+
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = f"{user.username} added test case " f"to {api.api} mapping as part of the library {api.library}"
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api}, a test case has been created",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        ret = new_test_case_mapping_test_specification.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update a test specification test case mapping
+        """
+        request_data = request.get_json(force=True)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            ts_mapping_tc = (
+                dbi.session.query(TestSpecificationTestCaseModel)
+                .filter(TestSpecificationTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Test Specification id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Api
+        api = get_api_from_indirect_test_specification_mapping(ts_mapping_tc, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        test_case = ts_mapping_tc.test_case
+
+        # Update only modified fields
+        modified_tc = False
+        for field in TestCase.fields:
+            if field.replace("_", "-") in request_data["test-case"].keys():
+                if getattr(test_case, field) != request_data["test-case"][field.replace("_", "-")]:
+                    modified_tc = True
+                    setattr(test_case, field, request_data["test-case"][field.replace("_", "-")])
+
+        if modified_tc:
+            test_case_path = os.path.join(
+                request_data["test-case"]["repository"], request_data["test-case"]["relative-path"]
+            )
+            # In case of local file
+            if test_case_path.startswith(os.path.sep):
+                if not is_safe_local_user_file_path(test_case_path):
+                    api_response.set_message(f"Invalid path: {test_case_path}")
+                    return api_response.return_bad_request()
+            setattr(test_case, "edited_by_id", user.id)
+
+        modified_tstc = False
+        if ts_mapping_tc.coverage != int(request_data["coverage"]):
+            modified_tstc = True
+            ts_mapping_tc.coverage = int(request_data["coverage"])
+            ts_mapping_tc.edited_by_id = user.id
+
+        ret = ts_mapping_tc.as_dict(db_session=dbi.session)
+        dbi.session.commit()
+
+        if modified_tc or modified_tstc:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified test case "
+                f"to {api.api} mapping as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api}, a test case has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete a test specification test case mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            ts_mapping_tc = (
+                dbi.session.query(TestSpecificationTestCaseModel)
+                .filter(TestSpecificationTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Test Specification id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        notification_tc_id = ts_mapping_tc.test_case.id
+        notification_tc_title = ts_mapping_tc.test_case.title
+        dbi.session.delete(ts_mapping_tc)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted test case "
+            f"{notification_tc_id} {notification_tc_title} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api}, a test case has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class DocumentDocumentMapping(Resource):
+    route = "/mapping/document/documents"
+    fields = ["document", "coverage"]
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """ Get the list of nested documents
+        We can have parent document mapped to
+        - an Api Reference Document snippet: relation-to must be 'api'
+        - another Document: relation-to must be 'document'
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # user mandatory fields are evaluated as part of the check_api_user_read_permission
+        mandatory_fields = ["api-id", "relation-id", "relation-to"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        query = dbi.session.query(DocumentDocumentModel)
+        if request_data["relation-to"] == "api":
+            query = query.filter(DocumentDocumentModel.document_mapping_api_id
+                                 == request_data["relation-id"])
+        elif request_data["relation-to"] == "document":
+            query = query.filter(DocumentDocumentModel.document_mapping_document_id
+                                 == request_data["relation-id"])
+        else:
+            api_response.set_message("relation-to value not valid")
+            return api_response.return_bad_request()
+
+        docdocs = [docdoc.as_dict(db_session=dbi.session) for docdoc in query.all()]
+
+        api_response.set_data(docdocs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new document document mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        api_doc = None
+        doc_doc = None
+
+        # user mandatory fields are evaluated as part of the check_api_user_read_permission
+        mandatory_fields = self.fields + ["api-id", "relation-id", "relation-to", "parent-document"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if "id" not in request_data["parent-document"].keys():
+            api_response.set_message("miss id of parent-document")
+            return api_response.return_bad_request()
+
+        relation_id = request_data["relation-id"]
+        relation_to = request_data["relation-to"]
+
+        # Find DocumentDocument
+        if relation_to == "api":
+            relation_to_query = dbi.session.query(ApiDocumentModel).filter(
+                ApiDocumentModel.id == relation_id
+            ).filter(
+                ApiDocumentModel.api_id == api.id
+            )
+            try:
+                api_doc = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+        elif relation_to == "document":
+            relation_to_query = dbi.session.query(DocumentDocumentModel).filter(
+                DocumentDocumentModel.id == relation_id
+            )
+            try:
+                doc_doc = relation_to_query.one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+
+            mapping_api = get_api_from_indirect_document_mapping(doc_doc, dbi.session)
+            if not mapping_api:
+                return api_response.return_not_found_sw_component()
+
+            if api.id != mapping_api.id:
+                api_response.set_message("Mapping is not related to the selected api")
+                return api_response.return_bad_request()
+
+        else:
+            api_response.set_message("relation-to value not valid")
+            return api_response.return_bad_request()
+
+        parent_document_id = request_data["parent-document"]["id"]
+        coverage = request_data["coverage"]
+
+        try:
+            parent_document = (
+                dbi.session.query(DocumentModel).filter(DocumentModel.id == parent_document_id).one()
+            )
+        except NoResultFound:
+            api_response.set_message("Document not found")
+            return api_response.return_not_found()
+
+        del parent_document  # Just need to check it exists
+
+        if "id" not in request_data["document"].keys():
+            # Create a new one
+            # `status` field should be skipped because a default is assigned in the model
+            for check_field in [x for x in Document.fields if x not in ["status", "valid"]]:
+                if check_field.replace("_", "-") not in request_data["document"].keys():
+                    api_response.set_missing_fields([check_field])
+                    return api_response.return_bad_request_missing_fields()
+
+            title = request_data["document"]["title"]
+            description = request_data["document"]["description"]
+            document_type = request_data["document"]["document-type"]
+            spdx_relation = request_data["document"]["spdx-relation"]
+            url = request_data["document"]["url"]
+            section = request_data["document"]["section"]
+            offset = request_data["document"]["offset"]
+
+            # Check for existing Sw Requirements
+            existing_docs = dbi.session.query(DocumentModel).filter(
+                DocumentModel.title == title).filter(
+                    DocumentModel.description == description).filter(
+                        DocumentModel.document_type == document_type).filter(
+                                DocumentModel.url == url).all()
+
+            if len(existing_docs):
+                api_response.set_message(
+                    f"Document `{existing_docs[0].id}` with same content already exists, "
+                    "consider to use the existing one or to change at least one field"
+                )
+                return api_response.return_conflict()
+
+            new_document = DocumentModel(
+                title, description, document_type, spdx_relation, url, section, offset, 0, user)
+
+            new_document_mapping_document = DocumentDocumentModel(
+                doc_doc, api_doc, new_document, section, offset, coverage, user
+            )
+
+            dbi.session.add(new_document)
+            dbi.session.add(new_document_mapping_document)
+
+        else:
+            # Map an existing SwRequirement
+            document_id = request_data["document"]["id"]
+
+            # Check for existing mapping
+            existing_docs_mapping = dbi.session.query(DocumentDocumentModel).filter(
+                DocumentDocumentModel.document_mapping_api_id == relation_id).filter(
+                    DocumentDocumentModel.document_id == document_id).all()
+            if existing_docs_mapping:
+                api_response.set_message(
+                    f"Document `{document_id}` already "
+                    "associated to the selected Document"
+                )
+                return api_response.return_conflict()
+
+            try:
+                document = (
+                    dbi.session.query(DocumentModel).filter(DocumentModel.id == document_id).one()
+                )
+            except NoResultFound:
+                api_response.set_message("Document not found")
+                return api_response.return_not_found()
+
+            section = ""
+            offset = 0
+
+            new_document_mapping_document = DocumentDocumentModel(
+                doc_doc, api_doc, document, section, offset, coverage, user
+            )
+            dbi.session.add(new_document_mapping_document)
+
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} added document " f"to {api.api} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_NEW,
+            f"{api.api}, a document has been created",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        ret = new_document_mapping_document.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update a document document mapping
+        """
+        request_data = request.get_json(force=True)
+
+        mandatory_fields = self.fields + ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            doc_mapping_doc = (
+                dbi.session.query(DocumentDocumentModel)
+                .filter(DocumentDocumentModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message("Document mapping not found")
+            return api_response.return_not_found()
+
+        doc = doc_mapping_doc.document
+
+        # Update only modified fields
+        modified_doc = False
+        for field in Document.fields:
+            if field.replace("_", "-") in request_data["document"].keys():
+                if getattr(doc, field) != request_data["document"][field.replace("_", "-")]:
+                    modified_doc = True
+                    setattr(doc, field, request_data["document"][field.replace("_", "-")])
+
+        if modified_doc:
+            setattr(doc, "edited_by_id", user.id)
+
+        modified_doc_doc = False
+        if doc_mapping_doc.coverage != int(request_data["coverage"]):
+            modified_doc_doc = True
+            doc_mapping_doc.coverage = int(request_data["coverage"])
+            doc_mapping_doc.edited_by_id = user.id
+
+        ret = doc_mapping_doc.as_dict(db_session=dbi.session)
+        dbi.session.commit()
+
+        if modified_doc or modified_doc_doc:
+            # Add Notifications
+            notification = (
+                f"{user.username} modified document "
+                f"from {api.api} mapping as part of the library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                NOTIFICATION_CATEGORY_EDIT,
+                f"{api.api}, a document has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete a document document mapping
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # check sw_requirement_mapping_sw_requirement
+        try:
+            doc_mapping_doc = (
+                dbi.session.query(DocumentDocumentModel)
+                .filter(DocumentDocumentModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message("Document mapping not found")
+            return api_response.return_not_found()
+
+        # Check DocumentDocumentModel refers to the same api defined in api-id
+        if doc_mapping_doc.document_mapping_api:
+            try:
+                parent_mapping = dbi.session.query(ApiDocumentModel).filter(
+                    ApiDocumentModel.id == doc_mapping_doc.document_mapping_api_id
+                ).one()
+            except NoResultFound:
+                api_response.set_message("Parent mapping not found")
+                return api_response.return_not_found()
+            mapping_api = parent_mapping.api
+        else:
+            mapping_api = get_api_from_indirect_document_mapping(doc_mapping_doc, dbi.session)
+
+        if not mapping_api:
+            api_response.set_message("Parent mapping not found")
+            return api_response.return_not_found()
+
+        if mapping_api.id != api.id:
+            api_response.set_message("Wrong api id")
+            return api_response.return_bad_request()
+
+        notification_doc_id = doc_mapping_doc.document.id
+        notification_doc_title = doc_mapping_doc.document.title
+        dbi.session.delete(doc_mapping_doc)
+        dbi.session.commit()
+
+        # Add Notifications
+        notification = (
+            f"{user.username} deleted document "
+            f"{notification_doc_id} {notification_doc_title} mapping as part of the library {api.library}"
+        )
+        notifications = NotificationModel(
+            api,
+            NOTIFICATION_CATEGORY_DELETE,
+            f"{api.api}, a document has been deleted",
+            notification,
+            f"[{user.id}]",
+            f"/mapping/{api.id}",
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class ForkApiSwRequirement(Resource):
+    route = "/fork/api/sw-requirement"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an api sw requirement
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            asr_mapping = (
+                dbi.session.query(ApiSwRequirementModel)
+                .filter(ApiSwRequirementModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Sw Requirement mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        permissions = get_api_user_permissions(asr_mapping.api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_sr = asr_mapping.sw_requirement.fork(created_by=user, db_session=dbi.session)
+        dbi.session.add(new_sr)
+        dbi.session.commit()
+
+        asr_mapping.sw_requirement_id = new_sr.id
+        dbi.session.commit()
+        api_response.set_data(asr_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkApiDocument(Resource):
+    route = "/fork/api/document"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an api document
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            ad_mapping = (
+                dbi.session.query(ApiDocumentModel)
+                .filter(ApiDocumentModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Document mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        permissions = get_api_user_permissions(ad_mapping.api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_doc = ad_mapping.document.fork(created_by=user, db_session=dbi.session)
+        ad_mapping.document_id = new_doc.id
+        dbi.session.commit()
+        api_response.set_data(ad_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkSwRequirementSwRequirement(Resource):
+    route = "/fork/sw-requirement/sw-requirement"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an sw requirement sw requirement
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            sr_sr_mapping = (
+                dbi.session.query(SwRequirementSwRequirementModel)
+                .filter(SwRequirementSwRequirementModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Sw Requirement mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        api = get_api_from_indirect_sw_requirement_mapping(sr_sr_mapping, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_sr = sr_sr_mapping.sw_requirement.fork(created_by=user, db_session=dbi.session)
+        dbi.session.add(new_sr)
+        dbi.session.commit()
+
+        sr_sr_mapping.sw_requirement_id = new_sr.id
+        dbi.session.commit()
+        api_response.set_data(sr_sr_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkDocumentDocument(Resource):
+    route = "/fork/document/document"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an document document
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            doc_doc_mapping = (
+                dbi.session.query(DocumentDocumentModel)
+                .filter(DocumentDocumentModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Document mapping to Document id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        api = get_api_from_indirect_document_mapping(doc_doc_mapping, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_doc = doc_doc_mapping.document.fork(created_by=user, db_session=dbi.session)
+
+        doc_doc_mapping.document_id = new_doc.id
+        dbi.session.commit()
+        api_response.set_data(doc_doc_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkApiJustification(Resource):
+    route = "/fork/api/justification"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an api justification
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            api_justification_mapping = (
+                dbi.session.query(ApiJustificationModel)
+                .filter(ApiJustificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Justification mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        permissions = get_api_user_permissions(api_justification_mapping.api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_justification = api_justification_mapping.justification.fork(created_by=user, db_session=dbi.session)
+        api_justification_mapping.justification_id = new_justification.id
+        dbi.session.commit()
+        api_response.set_data(api_justification_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkApiTestSpecification(Resource):
+    route = "/fork/api/test-specification"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            api_ts_mapping = (
+                dbi.session.query(ApiTestSpecificationModel)
+                .filter(ApiTestSpecificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Specification mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        permissions = get_api_user_permissions(api_ts_mapping.api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_ts = api_ts_mapping.test_specification.fork(created_by=user, db_session=dbi.session)
+        api_ts_mapping.test_specification_id = new_ts.id
+        dbi.session.commit()
+        api_response.set_data(api_ts_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkSwRequirementTestSpecification(Resource):
+    route = "/fork/sw-requirement/test-specification"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an sw requirement test specification
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+
+        try:
+            sw_requirement_ts_mapping = (
+                dbi.session.query(SwRequirementTestSpecificationModel)
+                .filter(SwRequirementTestSpecificationModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Specification mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        api = get_api_from_indirect_sw_requirement_mapping(sw_requirement_ts_mapping, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_ts = sw_requirement_ts_mapping.test_specification.fork(created_by=user, db_session=dbi.session)
+        sw_requirement_ts_mapping.test_specification_id = new_ts.id
+        dbi.session.commit()
+        api_response.set_data(sw_requirement_ts_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkApiTestCase(Resource):
+    route = "/fork/api/test-case"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an api test case
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            api_tc_mapping = (
+                dbi.session.query(ApiTestCaseModel)
+                .filter(ApiTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Api id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        permissions = get_api_user_permissions(api_tc_mapping.api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_tc = api_tc_mapping.test_case.fork(created_by=user, db_session=dbi.session)
+        api_tc_mapping.test_case_id = new_tc.id
+        dbi.session.commit()
+        api_response.set_data(api_tc_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkSwRequirementTestCase(Resource):
+    route = "/fork/sw-requirement/test-case"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork an sw requirement test case
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+
+        try:
+            sw_requirement_tc_mapping = (
+                dbi.session.query(SwRequirementTestCaseModel)
+                .filter(SwRequirementTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Sw Requirement id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        api = get_api_from_indirect_sw_requirement_mapping(sw_requirement_tc_mapping, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_tc = sw_requirement_tc_mapping.test_case.fork(created_by=user, db_session=dbi.session)
+        sw_requirement_tc_mapping.test_case_id = new_tc.id
+        dbi.session.commit()
+        api_response.set_data(sw_requirement_tc_mapping.as_dict())
+        return api_response.return_created()
+
+
+class ForkTestSpecificationTestCase(Resource):
+    route = "/fork/test-specification/test-case"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        fork a test specification test case
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["relation-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            test_specification_tc_mapping = (
+                dbi.session.query(TestSpecificationTestCaseModel)
+                .filter(TestSpecificationTestCaseModel.id == request_data["relation-id"])
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(
+                f"Unable to find the Test Case mapping to Test Specification id "
+                f"{request_data['relation-id']}"
+            )
+            return api_response.return_not_found()
+
+        # Permissions
+        api = get_api_from_indirect_test_specification_mapping(test_specification_tc_mapping, dbi.session)
+        if not isinstance(api, ApiModel):
+            return api_response.return_not_found_sw_component()
+
+        permissions = get_api_user_permissions(api, user, dbi.session)
+        if "w" not in permissions or user.role not in USER_ROLES_WRITE_PERMISSIONS:
+            return api_response.return_forbidden_write()
+
+        new_tc = test_specification_tc_mapping.test_case.fork(created_by=user, db_session=dbi.session)
+        test_specification_tc_mapping.test_case_id = new_tc.id
+        dbi.session.commit()
+        api_response.set_data(test_specification_tc_mapping.as_dict())
+        return api_response.return_created()
+
+
+class TestingSupportInitDb(Resource):
+    route = "/test-support/init-db"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        if app.config.get("TESTING", False):
+            init_db.initialization(db_name=app.config["DB"])
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class UserLogin(Resource):
+    route = "/user/login"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        Login user
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        DATE_FORMAT = "%m/%d/%Y, %H:%M:%S"
+        mandatory_fields = ["email", "password"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        cache_key = f"{request_data['email']}|{request.remote_addr}"
+
+        if cache_key in login_attempt_cache.keys():
+            if login_attempt_cache[cache_key]["attempts"] >= MAX_LOGIN_ATTEMPTS:
+                # check last attempt date
+                last_attempt_str = login_attempt_cache[cache_key]["last_attempt_dt"]
+                last_attempt_dt = datetime.datetime.strptime(last_attempt_str, DATE_FORMAT)
+                delta_sec = (datetime.datetime.now() - last_attempt_dt).total_seconds()
+                if delta_sec <= MAX_LOGIN_ATTEMPTS_TIMEOUT:
+                    retry_in = int(MAX_LOGIN_ATTEMPTS_TIMEOUT/60)
+                    api_response.set_message(
+                        f"Too many attempts (>= {MAX_LOGIN_ATTEMPTS}) for user "
+                        f"{request_data['email']}, retry in {retry_in} minutes"
+                    )
+                    return api_response.return_bad_request()
+                else:
+                    login_attempt_cache[cache_key]["attempts"] = 1
+
+        try:
+            str_encoded_password = base64.b64encode(request_data["password"].encode("utf-8")).decode("utf-8")
+            dbi = get_db()
+            user = dbi.session.query(UserModel).filter(UserModel.email == request_data["email"]).one()
+            if not user.enabled:
+                api_response.set_message("This user has been disabled, please contact your BASIL admin")
+                return api_response.return_unauthorized()
+            if user.pwd != str_encoded_password:
+                if cache_key in login_attempt_cache.keys():
+                    login_attempt_cache[cache_key]["attempts"] = login_attempt_cache[cache_key]["attempts"] + 1
+                else:
+                    login_attempt_cache[cache_key] = {"attempts": 1}
+
+                login_attempt_cache[cache_key]["last_attempt_dt"] = datetime.datetime.now().strftime(DATE_FORMAT)
+
+                api_response.set_message(f"Wrong credentials for user {request_data['email']}")
+                return api_response.return_bad_request()
+
+        except NoResultFound:
+            api_response.set_message("Email not assigned to any user, consider to register an account")
+            return api_response.return_unauthorized()
+
+        # Login success, clear login attempt cache for that ip
+        if cache_key in login_attempt_cache.keys():
+            del login_attempt_cache[cache_key]
+
+        # Refresh user token
+        user.token = str(uuid4())
+        dbi.session.add(user)
+        dbi.session.commit()
+
+        ret = {
+            "email": user.username,
+            "id": user.id,
+            "role": user.role,
+            "token": user.token,
+            "username": user.username
+        }
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class UserSignin(Resource):
+    route = "/user/signin"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        Signin user
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["username", "email", "password"]
+        email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        username = request_data["username"]
+        email = request_data["email"]
+        password = request_data["password"]
+
+        # Input validation needed in case of direct interaction with the API
+        if " " in username or len(username) < 4:
+            api_response.set_message("Username not valid, it hould be at least 4 chars and space is not allowed")
+            return api_response.return_bad_request()
+        if not re.match(email_regex, email):
+            api_response.set_message("Email not valid, it must be a valid email")
+            return api_response.return_bad_request()
+        if " " in password or len(password) < 4:
+            api_response.set_message("Password not valid it should be at least 4 chars and space is not allowed")
+            return api_response.return_bad_request()
+
+        same_username = dbi.session.query(UserModel).filter(UserModel.username == username).all()
+        if len(same_username) > 0:
+            api_response.set_message("Username already in use.")
+            return api_response.return_bad_request()
+
+        same_email = dbi.session.query(UserModel).filter(UserModel.email == email).all()
+        if len(same_email) > 0:
+            api_response.set_message("Email already in use.")
+            return api_response.return_bad_request()
+
+        # Validate fields constraints
+        filed_constraints = UserModel.get_field_constraints()
+        for field, constraint in filed_constraints.items():
+            if "max_length" in constraint and field in request_data:
+                if constraint["max_length"] is not None and len(request_data[field]) > constraint["max_length"]:
+                    api_response.set_message(f"{field} must be less than {constraint['max_length']} characters")
+                    return api_response.return_bad_request()
+
+        user = UserModel(username, email, password, "GUEST")
+        dbi.session.add(user)
+        dbi.session.commit()  # To have the user id
+
+        # Deny access to restricted software components
+        set_api_permission_stmt = (update(ApiModel).where(ApiModel.read_denials != '')).values(
+            read_denials=ApiModel.read_denials + f"[{user.id}]")
+        dbi.session.execute(set_api_permission_stmt)
+
+        # Add Notifications
+        notification = f"{user.username} joined us on BASIL!"
+        notifications = NotificationModel(
+            None,
+            NOTIFICATION_CATEGORY_NEW,
+            "New user!",
+            notification,
+            f"[{user.id}]",
+            "/admin"
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+
+        # Send email notifications to admins
+        email_subject = "BASIL - New User"
+        email_body = f"{username} joined us on BASIL!"
+        email_footer = EMAIL_DISCORD_FOOTER_MESSAGE
+
+        admins = dbi.session.query(UserModel).filter(
+            UserModel.role == "ADMIN").filter(
+            UserModel.enabled == 1).all()
+
+        recipient_list = []
+
+        for admin in admins:
+            if admin.email:
+                recipient_list.append(admin.email)
+
+        if recipient_list:
+            async_email_notification(SETTINGS_FILEPATH,
+                                     EMAIL_TEMPLATE_PATH,
+                                     recipient_list,
+                                     email_subject,
+                                     email_body,
+                                     email_footer,
+                                     True)
+
+        ret = {"id": user.id, "email": user.username, "token": user.token}
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+
+class UserApis(Resource):
+    route = "/user/apis"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """List of software components for the ones the user has owner permissions
+
+        This endpoint is used to list the apis that can be used in the permission copy
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["api-id", "token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # api
+        try:
+            api = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["api-id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_sw_component()
+
+        # check requester user api permission
+        user_permissions = get_api_user_permissions(api, user, dbi.session)
+        if "m" not in user_permissions or user.role not in USER_ROLES_MANAGE_PERMISSIONS:
+            return api_response.return_unauthorized()
+
+        # apis
+        query = dbi.session.query(ApiModel).filter(
+            or_(ApiModel.manage_permissions.like(f'%[{user.id}]%'),
+                ApiModel.created_by_id == user.id)
+        ).filter(ApiModel.id != api.id)
+
+        if "search" in request_data.keys():
+            search = request_data["search"]
+            query = query    .filter(
+                or_(ApiModel.api.like(f'%{search}%'),
+                    ApiModel.library.like(f'%{search}%'),
+                    ApiModel.library_version.like(f'%{search}%'),
+                    ApiModel.category.like(f'%{search}%'),
+                    ApiModel.tags.like(f'%{search}%'),)
+            )
+        query = query.order_by(ApiModel.api.asc())
+        apis = query.all()
+
+        ret = []
+        for current_api in apis:
+            current_api_dict = current_api.as_dict()
+            del current_api_dict["raw_specification_url"]
+            del current_api_dict["category"]
+            del current_api_dict["checksum"]
+            del current_api_dict["default_view"]
+            del current_api_dict["implementation_file"]
+            del current_api_dict["implementation_file_from_row"]
+            del current_api_dict["implementation_file_to_row"]
+            del current_api_dict["edited_by"]
+            del current_api_dict["last_coverage"]
+            del current_api_dict["tags"]
+            del current_api_dict["created_by"]
+            current_api_dict["selected"] = 1
+            if current_api.delete_permissions != api.delete_permissions:
+                current_api_dict["selected"] = 0
+            if current_api.edit_permissions != api.edit_permissions:
+                current_api_dict["selected"] = 0
+            if current_api.manage_permissions != api.manage_permissions:
+                current_api_dict["selected"] = 0
+            if current_api.read_denials != api.read_denials:
+                current_api_dict["selected"] = 0
+            if current_api.write_permissions != api.write_permissions:
+                current_api_dict["selected"] = 0
+            ret.append(current_api_dict)
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class UserPermissionsApiCopy(Resource):
+    route = "/user/permissions/copy"
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """Copy user permissions from api identified by api-id to the ones
+        specified in the copy-to list
+
+        User that is making the request is identified by user-id and token
+
+        Need to check that user has the owner permissions for each api defined in copy-to
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "copy-to", "token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # api
+        try:
+            api = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["api-id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_sw_component()
+
+        # check requester user api permission
+        user_permissions = get_api_user_permissions(api, user, dbi.session)
+        if "m" not in user_permissions or user.role not in USER_ROLES_MANAGE_PERMISSIONS:
+            return api_response.return_forbidden_manage()
+
+        for copy_to_api_id in request_data["copy-to"]:
+            try:
+                copy_to_api = dbi.session.query(ApiModel).filter(ApiModel.id == copy_to_api_id).one()
+            except NoResultFound:
+                return api_response.return_not_found_sw_component()
+
+            # check requester user api permission
+            user_permissions = get_api_user_permissions(copy_to_api, user, dbi.session)
+            if "m" not in user_permissions or user.role not in USER_ROLES_MANAGE_PERMISSIONS:
+                return api_response.return_forbidden_manage()
+
+            copy_to_api.delete_permissions = api.delete_permissions
+            copy_to_api.edit_permissions = api.edit_permissions
+            copy_to_api.manage_permissions = api.manage_permissions
+            copy_to_api.read_denials = api.read_denials
+            copy_to_api.write_permissions = api.write_permissions
+            dbi.session.add(copy_to_api)
+
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class UserPermissionsApi(Resource):
+    route = "/user/permissions/api"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        Get api permissions
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # Requester identified by id and token
+        # Email is related to the user for who I need to know api permissions
+        mandatory_fields = ["api-id", "token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # api
+        try:
+            api = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["api-id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_sw_component()
+
+        # check requester user api permission
+        user_permissions = get_api_user_permissions(api, user, dbi.session)
+        if "m" not in user_permissions or user.role not in USER_ROLES_MANAGE_PERMISSIONS:
+            return api_response.return_forbidden_manage()
+
+        query = dbi.session.query(UserModel).filter(
+            UserModel.id != user.id
+        ).filter(
+            UserModel.role != 'GUEST'
+        ).filter(
+            UserModel.enabled == 1
+        )
+        if "search" in request_data.keys():
+            query = query.filter(
+                or_(
+                    UserModel.username.like(f"%{request_data['search']}%"),
+                    UserModel.email.like(f"%{request_data['search']}%")
+                )
+            )
+
+        users = query.all()
+        users_dict = []
+        for i in range(len(users)):
+            tmp = users[i].as_dict()
+            tmp["permissions"] = get_api_user_permissions(api, users[i], dbi.session)
+            tmp["write_permission_request"] = (
+                1 if f"[{tmp['id']}]" in get_safe_str(api.write_permission_requests) and
+                users[i].role in USER_ROLES_WRITE_PERMISSIONS
+                else 0
+            )
+            del tmp["api_notifications"]
+            users_dict.append(tmp)
+        api_response.set_data(users_dict)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        # Requester identified by id and token
+        # Email is related to the user for who I need to know api permissions
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["api-id", "permissions", "token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # api
+        try:
+            api = dbi.session.query(ApiModel).filter(ApiModel.id == request_data["api-id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_sw_component()
+
+        # check requester user api permission
+        user_permissions = get_api_user_permissions(api, user, dbi.session)
+        if "m" not in user_permissions or user.role not in USER_ROLES_MANAGE_PERMISSIONS:
+            return api_response.return_forbidden_manage()
+
+        for user_permission in request_data["permissions"]:
+            user_permission_id = user_permission.get("id", None)
+            if user_permission_id:
+                try:
+                    target_user = dbi.session.query(UserModel).filter(
+                        UserModel.id == user_permission["id"]).filter(
+                        UserModel.role != 'GUEST').one()
+                except NoResultFound:
+                    return api_response.return_not_found_user()
+
+            permission_string = f"[{target_user.id}]"
+            user_permission_changed = False
+
+            read_denials = get_safe_str(api.read_denials)
+            write_permissions = get_safe_str(api.write_permissions)
+            write_permission_requests = get_safe_str(api.write_permission_requests)
+            manage_permissions = get_safe_str(api.manage_permissions)
+            edit_permissions = get_safe_str(api.edit_permissions)
+
+            # Edit Permission
+            if "e" in user_permission["permissions"]:
+                if permission_string not in edit_permissions:
+                    api.edit_permissions += permission_string
+                    user_permission_changed = True
+            else:
+                if permission_string in edit_permissions:
+                    api.edit_permissions = edit_permissions.replace(permission_string, "")
+                    user_permission_changed = True
+
+            # Manage Permission
+            if "m" in user_permission["permissions"]:
+                if permission_string not in manage_permissions:
+                    api.manage_permissions += permission_string
+                    user_permission_changed = True
+            else:
+                if permission_string in manage_permissions:
+                    api.manage_permissions = manage_permissions.replace(permission_string, "")
+                    user_permission_changed = True
+
+            # Read Permission
+            if "r" in user_permission["permissions"]:
+                if permission_string in read_denials:
+                    api.read_denials = read_denials.replace(permission_string, "")
+                    user_permission_changed = True
+                    if api.read_denials == "[0]":
+                        api.read_denials = ""
+            else:
+                if permission_string not in read_denials:
+                    api.read_denials += permission_string
+                    if "[0]" not in read_denials:
+                        api.read_denials += "[0]"
+
+            # Write Permission
+            if "w" in user_permission["permissions"]:
+                if permission_string not in write_permissions:
+                    api.write_permissions += permission_string
+                    user_permission_changed = True
+                    # Remove permission request
+                    if permission_string in write_permission_requests:
+                        api.write_permission_requests = write_permission_requests.replace(permission_string, "")
+            else:
+                if permission_string in write_permissions:
+                    api.write_permissions = write_permissions.replace(permission_string, "")
+                    user_permission_changed = True
+
+            # Create a notification only for the user
+            if user_permission_changed:
+                notification_text = f"Your permissions for {api.api} are: "
+                if "r" in user_permission["permissions"]:
+                    notification_text += "Read, "
+                if "w" in user_permission["permissions"]:
+                    notification_text += "Write, "
+                if "e" in user_permission["permissions"]:
+                    notification_text += "Edit, "
+                if "m" in user_permission["permissions"]:
+                    notification_text += "Manage User Permission"
+
+                notification_text = notification_text.strip().rstrip(",")
+
+                notification = NotificationModel(
+                    api,
+                    "info",
+                    f"Your permissions for {api.api} changed",
+                    notification_text,
+                    f"[{user.id}]",
+                    f"/?currentLibrary={api.library}&search={api.api}",
+                )
+                notification.user_ids = permission_string
+                dbi.session.add(notification)
+                dbi.session.commit()
+
+        dbi.session.add(api)
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class UserEnable(Resource):
+    route = "/user/enable"
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        Enable or disable user
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # Requester identified by id and token
+        # Email is related to the user for who I need to change the status
+        mandatory_fields = ["token", "user-id", "target-user"]
+        target_user_mandatory_fields = ["id", "enabled"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        wrong_fields = get_wrong_mandatory_fields(target_user_mandatory_fields, request_data["target-user"])
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        if not str(request_data["target-user"]["enabled"]).strip().isnumeric():
+            api_response.set_message("Not numeric value")
+            return api_response.return_bad_request()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        try:
+            target_user = dbi.session.query(UserModel).filter(UserModel.id == request_data["target-user"]["id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_user()
+
+        target_user.enabled = int(str(request_data["target-user"]["enabled"]).strip())
+
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class User(Resource):
+    route = "/user"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        Get list of users (requires ADMIN role)
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # Requester identified by id and token
+        mandatory_fields = ["user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role != "ADMIN":
+            return api_response.return_unauthorized()
+
+        users = dbi.session.query(UserModel).filter(UserModel.id != request_data["user-id"]).all()
+
+        # Sort by role and username
+        users = sorted(users, key=lambda x: (x.role, x.username))
+        ret = [x.as_dict(full_data=True) for x in users]
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """Edit username or password
+        Note: Need to perform the validation to avoid direct usage of the api
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["user-id", "token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Edit username
+        if "username" in request_data.keys():
+            username = request_data["username"]
+            if " " in username or len(username) < 4:
+                api_response.set_message("Username not valid, it hould be at least 4 chars and space is not allowed")
+                return api_response.return_bad_request()
+
+            same_username = dbi.session.query(UserModel).filter(UserModel.username == username).all()
+            if len(same_username) > 0:
+                api_response.set_message("Username already in use.")
+                return api_response.return_bad_request()
+
+            user.username = username
+            dbi.session.commit()
+            dbi.close()
+            ret = {"result": "success", "message": "Your username has been saved. Please login again."}
+            api_response.set_data(ret)
+            return api_response.return_ok()
+
+        # Edit password
+        if "password" in request_data.keys():
+            password = request_data["password"]
+            if " " in password or len(password) < 4:
+                api_response.set_message("Password not valid it should be at least 4 chars and space is not allowed")
+                return api_response.return_bad_request()
+            encoded_password = base64.b64encode(password.encode("utf-8")).decode("utf-8")
+            user.pwd = encoded_password
+            dbi.session.add(user)
+            dbi.session.commit()
+            dbi.close()
+            ret = {"result": "success", "message": "Your password has been saved. Please login again."}
+            api_response.set_data(ret)
+            return api_response.return_ok()
+
+        api_response.set_message("No changes to save")
+        return api_response.return_bad_request()
+
+
+class UserResetPassword(Resource):
+    route = "/user/reset-password"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """If the request reset_token match the one in the db for the selected user
+        we will copy the reset password to the official one and we will clear the
+        reset_token and reset_pwd fields
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["email", "reset_token"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        email = request_data["email"].strip()
+        reset_token = request_data["reset_token"].strip()
+
+        try:
+            target_user = dbi.session.query(UserModel).filter(
+                UserModel.email == email).filter(
+                    UserModel.reset_token == reset_token).one()
+        except NoResultFound:
+            return api_response.return_not_found_user()
+
+        target_user.pwd = target_user.reset_pwd
+        target_user.reset_pwd = ""
+        target_user.reset_token = ""
+        dbi.session.add(target_user)
+        dbi.session.commit()
+        dbi.close()
+
+        # Read updated settings
+        settings = get_updated_settings()
+
+        # Notification
+        email_subject = "BASIL - Confirm password reset"
+        email_footer = EMAIL_DISCORD_FOOTER_MESSAGE
+        email_body = "<p>Your password has been reset</p>"
+        email_body = add_html_link_to_email_body(settings=settings, body=email_body)
+        email_body = get_html_email_body_from_template(EMAIL_TEMPLATE_PATH,
+                                                       email_subject,
+                                                       email_body,
+                                                       email_footer)
+        email_notifier = EmailNotifier(
+            settings=settings,
+            settings_last_modified=SETTINGS_LAST_MODIFIED,
+            dry_mode=False
+        )
+        ret = email_notifier.send_email(email, email_subject, email_body, True)
+        if ret:
+            if "redirect" in request_data.keys():
+                return redirect(request_data["redirect"], code=302)
+            ret = {"result": "success", "message": "Your password has been reset"}
+            api_response.set_data(ret)
+            return api_response.return_ok()
+        else:
+            api_response.set_message("Unable to send the email. Please contact the admin.")
+            return api_response.return_precondition_failed()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """Generate a reset_token and a reset_pwd
+        send an email with a link to activate the reset_pwd
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["email"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        email = request_data["email"].strip()
+
+        try:
+            target_user = dbi.session.query(UserModel).filter(UserModel.email == email).one()
+        except NoResultFound:
+            return api_response.return_not_found_user()
+
+        # Read updated settings
+        settings = get_updated_settings()
+
+        # generate reset_token and reset_pwd
+        email_subject = "BASIL - Password reset"
+        email_footer = EMAIL_DISCORD_FOOTER_MESSAGE
+
+        reset_pwd = secrets.token_urlsafe(10)
+        encoded_reset_pwd = base64.b64encode(reset_pwd.encode("utf-8")).decode("utf-8")
+
+        reset_token = secrets.token_urlsafe(90)
+        reset_url = f"{request.base_url}?email={email}&reset_token={reset_token}"
+        if "app_url" in settings.keys():
+            if str(settings["app_url"]).strip():
+                reset_url += f"&redirect={settings['app_url']}/login?from=reset-password"
+
+        target_user.reset_pwd = encoded_reset_pwd
+        target_user.reset_token = reset_token
+        dbi.session.add(target_user)
+        dbi.session.commit()
+        dbi.close()
+        email_body = f"""
+                <p>Someone requested a password reset for your account.</p>
+                <p>If you have not requested a password reset, please ignore and delete this email.
+                You will continue to log in with your current credentials.</p>
+                <p>We created a the following temporary password:</p>
+                <p><b>{reset_pwd}</b></p>
+                <p>If you want to reset your password to the one shared above,
+                click <br><br> <a target="_blank" class="button" href="{reset_url}">RESET PASSWORD</a></p>"""
+        email_body = get_html_email_body_from_template(EMAIL_TEMPLATE_PATH,
+                                                       email_subject,
+                                                       email_body,
+                                                       email_footer)
+        email_notifier = EmailNotifier(
+            settings=settings,
+            settings_last_modified=SETTINGS_LAST_MODIFIED,
+            dry_mode=False
+        )
+        ret = email_notifier.send_email(email, email_subject, email_body, True)
+        if ret:
+            ret = {"result": "success", "message": "An email has been sent to reset your password"}
+            api_response.set_data(ret)
+            return api_response.return_created()
+        else:
+            api_response.set_message("Unable to send the email. Please contact the admin.")
+            return api_response.return_precondition_failed()
+
+
+class AdminResetUserPassword(Resource):
+    route = "/admin/reset-user-password"
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        reset the password of a user
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # Requester identified by id and token
+        # Email is related to the user for who I need to change the status
+        mandatory_fields = ["target-user", "token", "user-id"]
+        target_user_mandatory_fields = ["id", "password"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        wrong_fields = get_wrong_mandatory_fields(target_user_mandatory_fields, request_data["target-user"])
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        try:
+            target_user = dbi.session.query(UserModel).filter(UserModel.id == request_data["target-user"]["id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_user()
+
+        target_user.pwd = request_data["target-user"]["password"]
+        dbi.session.commit()
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class UserRole(Resource):
+    route = "/user/role"
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        Change the role of a user
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        # Requester identified by id and token
+        # Email is related to the user for who I need to change the role
+        mandatory_fields = ["token", "user-id", "target-user"]
+        target_user_mandatory_fields = ["id", "role"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        wrong_fields = get_wrong_mandatory_fields(target_user_mandatory_fields, request_data["target-user"])
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        target_user_role = request_data["target-user"]["role"]
+        if target_user_role not in ["ADMIN", "GUEST", "USER"]:
+            api_response.set_message(f"Invalid role: {target_user_role}")
+            return api_response.return_bad_request()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        try:
+            target_user = dbi.session.query(UserModel).filter(UserModel.id == request_data["target-user"]["id"]).one()
+        except NoResultFound:
+            return api_response.return_not_found_user()
+
+        target_user.role = target_user_role
+        dbi.session.commit()
+
+        # Notification
+        settings = get_updated_settings()
+        email_subject = "BASIL user role changed"
+        email_footer = EMAIL_DISCORD_FOOTER_MESSAGE
+        email_body = f"<p>Your BASIL user role changed to <b>{target_user.role}</b></p>"
+        email_body += "<p>See the <a href='" \
+                      "https://basil-the-fusa-spice.readthedocs.io/en/latest/user_management.html#roles" \
+                      "'>BASIL documentation</a> for a description of each role.</p>"
+        email_body = add_html_link_to_email_body(settings=settings, body=email_body)
+
+        async_email_notification(SETTINGS_FILEPATH,
+                                 EMAIL_TEMPLATE_PATH,
+                                 [target_user.username],
+                                 email_subject,
+                                 email_body,
+                                 email_footer,
+                                 True)
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class UserNotifications(Resource):
+    route = "/user/notifications"
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        """
+        Delete a notification
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # It should be possible to delete 1 notification filtering with `id`
+        # It should be possible to clear all the notifications if `id` is not defined
+        if "id" in request_data.keys():
+            try:
+                notifications = (
+                    dbi.session.query(NotificationModel).filter(NotificationModel.id == request_data["id"]).all()
+                )
+            except NoResultFound:
+                return api_response.return_not_found()
+        else:
+
+            user_api_notifications = []
+            if user.api_notifications:
+                user_api_notifications = user.api_notifications.replace(" ", "").split(",")
+                user_api_notifications = [int(x) for x in user_api_notifications]  # Need list of int
+
+            NoneVar = None  # To avoid flake8 warning comparing None with `==` instead of `is`
+            notifications = (
+                dbi.session.query(NotificationModel)
+                .filter(or_(NotificationModel.api_id.in_(user_api_notifications), NotificationModel.api_id == NoneVar))
+                .order_by(NotificationModel.created_at.desc())
+                .all()
+            )
+
+        for i in range(len(notifications)):
+            if f"[{user.id}]" not in notifications[i].read_by:
+                notifications[i].read_by += f"[{user.id}]"
+
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        Get notifications
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        undesired_keys = ["ready_by"]
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        user_api_notifications = []
+        if user.api_notifications:
+            user_api_notifications = user.api_notifications.replace(" ", "").split(",")
+            user_api_notifications = [int(x) for x in user_api_notifications]  # Need list of int
+
+        # List of api ids for the ones the current use is owner
+        owner_api_list_query = (
+            dbi.session.query(ApiModel.id)
+            .filter(ApiModel.manage_permissions.contains(f"[{user.id}]"))
+        )
+
+        NoneVar = None  # To avoid flake8 warning comparing None with `==` instead of `is`
+
+        notifications = []
+
+        # Query to extract notifications not related to api
+        no_api_notifications = (
+            dbi.session.query(NotificationModel)
+            .filter(NotificationModel.api_id == NoneVar)
+            .filter(~NotificationModel.read_by.contains(f"[{user.id}]"))
+            .all()
+        )
+
+        # Query to extract api related notifications not read from current user
+        # Only api the user requested notifications for
+        api_notifications_not_read_query = (
+            dbi.session.query(NotificationModel)
+            .filter(~NotificationModel.read_by.contains(f"[{user.id}]"))
+        )
+
+        # Owner notifications
+        owner_notifications = (
+            api_notifications_not_read_query
+            .filter(NotificationModel.for_owners == 1)
+            .filter(NotificationModel.api_id.in_(owner_api_list_query))
+            .all()
+        )
+
+        # Not Owner notifications
+        not_owner_notifications = (
+            api_notifications_not_read_query
+            .filter(NotificationModel.for_owners == 0)
+            .filter(
+                or_(
+                    and_(
+                        NotificationModel.user_ids == "",
+                        NotificationModel.api_id.in_(user_api_notifications)
+                    ),
+                    NotificationModel.user_ids.contains(f"[{user.id}]")
+                )
+            ).all()
+        )
+
+        notifications += no_api_notifications
+        notifications += owner_notifications
+        notifications += not_owner_notifications
+
+        tmp = [x.as_dict() for x in notifications]
+        tmp = [get_dict_without_keys(x, undesired_keys) for x in tmp]
+        api_response.set_data(tmp)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        Update notifications
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "notifications", "token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if not user.api_notifications:
+            user_api_notifications = []
+        else:
+            user_api_notifications = user.api_notifications.replace(" ", "").split(",")
+            user_api_notifications = [int(x) for x in user_api_notifications]  # Need list of int
+
+        api_id = int(request_data["api-id"])
+        if request_data["notifications"] == 0:
+            if api_id in user_api_notifications:
+                user_api_notifications.remove(api_id)
+        elif request_data["notifications"] == 1:
+            if api_id not in user_api_notifications:
+                user_api_notifications.append(api_id)
+
+        user.api_notifications = ",".join([str(x) for x in user_api_notifications])
+        dbi.session.commit()
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class Testing(Resource):
+    route = "/testing"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        Get testing
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["mapped_to_id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        mapping = (
+            dbi.session.query(SwRequirementTestCaseModel)
+            .filter(SwRequirementTestCaseModel.id == request_data["mapped_to_id"])
+            .one()
+        )
+
+        api = get_api_from_indirect_sw_requirement_mapping(mapping, dbi.session)
+        api_response.set_data(api.as_dict())
+        return api_response.return_ok()
+
+
+class UserSshKey(Resource):
+    route = "/user/ssh-key"
+    fields = get_model_editable_fields(SshKeyModel, False)
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get user ssh keys
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        ssh_keys = (
+            dbi.session.query(SshKeyModel)
+            .filter(SshKeyModel.created_by_id == user_id)
+            .order_by(SshKeyModel.created_at.desc())
+            .all()
+        )
+        ssh_keys = [x.as_dict(full_data=True) for x in ssh_keys]
+        api_response.set_data(ssh_keys)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        post user ssh key
+        """
+        request_data = request.get_json(force=True)
+
+        wrong_fields = get_wrong_mandatory_fields(self.fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        title = request_data["title"].strip()
+        ssh_key = request_data["ssh_key"].strip()
+        if title == "" or ssh_key == "":
+            api_response.set_message("Missing title or ssh_key value")
+            return api_response.return_bad_request()
+
+        existing = (
+            dbi.session.query(SshKeyModel)
+            .filter(SshKeyModel.title == title, SshKeyModel.created_by_id == user.id)
+            .all()
+        )
+
+        if len(existing):
+            api_response.set_message("SSH key already exists")
+            return api_response.return_conflict()
+
+        new_ssh_key = SshKeyModel(title, ssh_key, user)
+        dbi.session.add(new_ssh_key)
+        dbi.session.commit()
+
+        # File creation and permissions set
+        if not os.path.exists(SSH_KEYS_PATH):
+            os.mkdir(SSH_KEYS_PATH)
+
+        f = open(f"{SSH_KEYS_PATH}/{new_ssh_key.id}", "w")
+        f.write(f"{new_ssh_key.ssh_key.strip()}\n")
+        f.close()
+
+        os.chmod(f"{SSH_KEYS_PATH}/{new_ssh_key.id}", 0o600)
+
+        if not os.path.exists(f"{SSH_KEYS_PATH}/{new_ssh_key.id}"):
+            dbi.session.delete(new_ssh_key)
+            dbi.session.commit()
+            api_response.set_message("Error creating SSH key")
+            return api_response.return_precondition_failed()
+
+        api_response.set_data(new_ssh_key.as_dict())
+        return api_response.return_created()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        """
+        delete user ssh key
+        """
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        try:
+            ssh_key = dbi.session.query(SshKeyModel).filter(SshKeyModel.id == request_data["id"]).one()
+        except NoResultFound:
+            api_response.set_message("SSH key not found")
+            return api_response.return_not_found()
+
+        if ssh_key.created_by.id != user.id:
+            api_response.set_message("SSH key not owned by the current user")
+            return api_response.return_unauthorized()
+
+        dbi.session.delete(ssh_key)
+        dbi.session.commit()
+
+        if os.path.exists(f"{SSH_KEYS_PATH}/{ssh_key.id}"):
+            os.remove(f"{SSH_KEYS_PATH}/{ssh_key.id}")
+
+        api_response.set_data(True)
+        return api_response.return_ok()
+
+
+class UserFiles(Resource):
+    route = "/user/files"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get user files
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = []
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+            api_response.set_data(ret)
+            return api_response.return_ok()
+
+        sub_path = request_data.get("path", "")
+        recursive = str(request_data.get("recursive", "")).lower() == "true"
+
+        if sub_path:
+            listing_path = os.path.join(user_files_path, sub_path)
+        else:
+            listing_path = user_files_path
+
+        if not is_safe_user_path(user_files_path, listing_path):
+            api_response.set_message("Invalid path")
+            return api_response.return_bad_request()
+
+        if not os.path.isdir(listing_path):
+            api_response.set_message("Directory not found")
+            return api_response.return_not_found()
+
+        if recursive:
+            i = 0
+            for root, _dirs, files in os.walk(listing_path):
+                _dirs[:] = [d for d in _dirs if not d.startswith(".")]
+                for fname in sorted(files):
+                    if fname.startswith("."):
+                        continue
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, user_files_path)
+                    if "filter" in request_data:
+                        if str(request_data["filter"]).lower() not in fname.lower():
+                            continue
+                    ret.append({
+                        "index": i,
+                        "filepath": full,
+                        "relative_path": rel,
+                        "name": fname,
+                        "type": "file",
+                        "updated_at": time.ctime(os.path.getmtime(full)),
+                    })
+                    i += 1
+        else:
+            i = 0
+            for entry_name in os.listdir(listing_path):
+                if entry_name.startswith("."):
+                    continue
+
+                full = os.path.join(listing_path, entry_name)
+                rel = os.path.relpath(full, user_files_path)
+                entry_type = "directory" if os.path.isdir(full) else "file"
+
+                if "filter" in request_data:
+                    if str(request_data["filter"]).lower() not in entry_name.lower():
+                        continue
+
+                ret.append({
+                    "index": i,
+                    "filepath": full,
+                    "relative_path": rel,
+                    "name": entry_name,
+                    "type": entry_type,
+                    "updated_at": time.ctime(os.path.getmtime(full)),
+                })
+                i += 1
+
+        ret = sorted(ret, key=lambda f: (f["type"] != "directory", f["name"].lower()))
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        post user file
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["filename", "filecontent"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        filename = request_data["filename"]
+        basename = os.path.basename(filename)
+
+        if basename.startswith("."):
+            api_response.set_message("Filename cannot start with a dot")
+            return api_response.return_bad_request()
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+
+        filecontent = request_data["filecontent"]
+        filepath = os.path.join(user_files_path, filename)
+
+        if not is_safe_user_path(user_files_path, filepath):
+            api_response.set_message("Invalid path")
+            return api_response.return_bad_request()
+
+        if filename == "":
+            api_response.set_message("Missing filename value")
+            return api_response.return_bad_request()
+        if filecontent == "":
+            api_response.set_message("Missing filecontent value")
+            return api_response.return_bad_request()
+
+        if os.path.exists(filepath):
+            api_response.set_message("File already exists")
+            return api_response.return_conflict()
+
+        parent_dir = os.path.dirname(filepath)
+        os.makedirs(parent_dir, exist_ok=True)
+
+        f = open(filepath, "w")
+        f.write(filecontent)
+        f.close()
+
+        if not os.path.exists(filepath):
+            api_response.set_message("File not found")
+            return api_response.return_not_found()
+
+        ret = {
+            "index": 0,
+            "filepath": filepath,
+            "relative_path": os.path.relpath(filepath, user_files_path),
+            "name": os.path.basename(filepath),
+            "type": "file",
+            "updated_at": time.ctime(os.path.getmtime(filepath))
+        }
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        move or rename a user file or directory
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["source", "destination"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+
+        source = request_data["source"]
+        destination = request_data["destination"]
+
+        if source == "" or destination == "":
+            api_response.set_message("Source and destination must not be empty")
+            return api_response.return_bad_request()
+
+        src_path = os.path.join(user_files_path, source)
+        dst_path = os.path.join(user_files_path, destination)
+
+        if not is_safe_user_path(user_files_path, src_path):
+            api_response.set_message("Invalid source path")
+            return api_response.return_bad_request()
+
+        if not is_safe_user_path(user_files_path, dst_path):
+            api_response.set_message("Invalid destination path")
+            return api_response.return_bad_request()
+
+        if not os.path.exists(src_path):
+            api_response.set_message("Source not found")
+            return api_response.return_not_found()
+
+        if os.path.exists(dst_path):
+            api_response.set_message("Destination already exists")
+            return api_response.return_conflict()
+
+        dst_parent = os.path.dirname(dst_path)
+        os.makedirs(dst_parent, exist_ok=True)
+
+        shutil.move(src_path, dst_path)
+
+        entry_type = "directory" if os.path.isdir(dst_path) else "file"
+        ret = {
+            "index": 0,
+            "filepath": dst_path,
+            "relative_path": os.path.relpath(dst_path, user_files_path),
+            "name": os.path.basename(dst_path),
+            "type": entry_type,
+            "updated_at": time.ctime(os.path.getmtime(dst_path)),
+        }
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        """
+        delete user file or directory
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["filename"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+            api_response.set_message("File not found")
+            return api_response.return_not_found()
+
+        filename = request_data["filename"]
+        filepath = os.path.join(user_files_path, filename)
+
+        if filename == "":
+            api_response.set_message("Missing filename value")
+            return api_response.return_bad_request()
+
+        if not is_safe_user_path(user_files_path, filepath):
+            api_response.set_message("Invalid path")
+            return api_response.return_bad_request()
+
+        if not os.path.exists(filepath):
+            api_response.set_message("File not found")
+            return api_response.return_not_found()
+
+        if os.path.isdir(filepath):
+            shutil.rmtree(filepath)
+        else:
+            os.remove(filepath)
+
+        if os.path.exists(filepath):
+            api_response.set_message("Failed to delete")
+            return api_response.return_not_found()
+
+        ret = {
+            "index": 0,
+            "filepath": filepath,
+            "relative_path": os.path.relpath(filepath, user_files_path),
+            "name": os.path.basename(filepath),
+            "updated_at": "",
+        }
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class UserFileFolder(Resource):
+    route = "/user/files/folder"
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        create a user folder
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["foldername"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+
+        foldername = request_data["foldername"]
+        if foldername == "":
+            api_response.set_message("Missing foldername value")
+            return api_response.return_bad_request()
+
+        if os.path.basename(foldername).startswith("."):
+            api_response.set_message("Folder name cannot start with a dot")
+            return api_response.return_bad_request()
+
+        folderpath = os.path.join(user_files_path, foldername)
+
+        if not is_safe_user_path(user_files_path, folderpath):
+            api_response.set_message("Invalid path")
+            return api_response.return_bad_request()
+
+        if os.path.exists(folderpath):
+            api_response.set_message("Folder already exists")
+            return api_response.return_conflict()
+
+        os.makedirs(folderpath, exist_ok=True)
+
+        ret = {
+            "index": 0,
+            "filepath": folderpath,
+            "relative_path": os.path.relpath(folderpath, user_files_path),
+            "name": os.path.basename(folderpath),
+            "type": "directory",
+            "updated_at": time.ctime(os.path.getmtime(folderpath)),
+        }
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+
+class UserFileContent(Resource):
+    route = "/user/files/content"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get user file content
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        fields = ["filename"]
+        ret = {}
+
+        wrong_fields = get_wrong_mandatory_fields(fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+            return api_response.return_not_found()
+
+        filepath = os.path.join(user_files_path, request_data["filename"])
+
+        if not is_safe_user_path(user_files_path, filepath):
+            api_response.set_message("Invalid path")
+            return api_response.return_bad_request()
+
+        if not os.path.exists(filepath):
+            return api_response.return_not_found()
+
+        filecontent = read_file(filepath)
+        if not filecontent:
+            return api_response.return_not_found()
+
+        ret = {
+            "index": 0,
+            "filepath": filepath,
+            "filecontent": filecontent,
+            "updated_at": time.ctime(os.path.getmtime(os.path.join(filepath))),
+        }
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        put user file content
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request.get_json(force=True))
+
+        mandatory_fields = ["filename", "filecontent"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        dbi.close()
+
+        user_files_path = os.path.join(USER_FILES_BASE_DIR, f"{user_id}")
+        if not os.path.exists(user_files_path):
+            os.makedirs(user_files_path, exist_ok=True)
+            return api_response.return_not_found()
+
+        filename = request_data["filename"]
+        filecontent = request_data["filecontent"]
+        filepath = os.path.join(user_files_path, filename)
+
+        if not is_safe_user_path(user_files_path, filepath):
+            api_response.set_message("Invalid path")
+            return api_response.return_bad_request()
+
+        if filename == "" or filecontent == "":
+            return api_response.return_bad_request()
+
+        if not os.path.exists(filepath):
+            return api_response.return_not_found()
+
+        f = open(filepath, "w")
+        f.write(filecontent)
+        f.close()
+
+        if not os.path.exists(filepath):
+            return api_response.return_not_found()
+
+        ret = {
+            "index": 0,
+            "filepath": filepath,
+            "filecontent": filecontent,
+            "updated_at": time.ctime(os.path.getmtime(filepath)),
+        }
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class TestRunConfig(Resource):
+    # Do not support delete and put
+    # Once a Test Run has been executed the Test Run Config is defined
+    # and should be accessible in future to identify the Test Run
+    # A new Test Config is created by the Test Run post endpoint
+    route = "/mapping/api/test-run-configs"
+    fields = get_model_editable_fields(TestRunConfigModel, False)
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get test run configs
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        dbi = get_db()
+
+        # User
+        user_id = get_user_id_from_request(request_data, dbi.session)
+        if user_id == 0:
+            return api_response.return_unauthorized()
+
+        query = dbi.session.query(TestRunConfigModel).filter(TestRunConfigModel.created_by_id == user_id)
+
+        if "search" in request_data.keys():
+            query = query.filter(
+                or_(
+                    TestRunConfigModel.title.like(f'%{request_data["search"]}%'),
+                    TestRunConfigModel.provision_guest.like(f'%{request_data["search"]}%'),
+                    TestRunConfigModel.provision_guest_port.like(f'%{request_data["search"]}%'),
+                    TestRunConfigModel.environment_vars.like(f'%{request_data["search"]}%'),
+                    TestRunConfigModel.context_vars.like(f'%{request_data["search"]}%'),
+                )
+            )
+
+        configs = query.order_by(TestRunConfigModel.created_at.desc()).all()
+
+        configs = [x.as_dict(full_data=True) for x in configs]
+        api_response.set_data(configs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        create a new test run config
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        dbi = get_db()
+
+        # User
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Test Run Configuration
+        test_config_ret, test_config_status = add_test_run_config(dbi, request_data, user, api_response)
+        if test_config_status not in [OK_STATUS, CREATED_STATUS]:
+            return test_config_ret, test_config_status
+        if isinstance(test_config_ret, dict):
+            tc_id = test_config_ret.get("id")
+            test_config = dbi.session.query(TestRunConfigModel).filter(TestRunConfigModel.id == tc_id).one()
+        else:
+            test_config = test_config_ret
+        ret = test_config.as_dict()
+        api_response.set_data(ret)
+        if test_config_status == OK_STATUS:
+            return api_response.return_ok()
+        return api_response.return_created()
+
+
+class TestRun(Resource):
+    route = "/mapping/api/test-runs"
+    fields = get_model_editable_fields(TestRunModel, False)
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get test runs
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "mapped_to_type", "mapped_to_id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        runs_query = (
+            dbi.session.query(TestRunModel)
+            .join(TestRunConfigModel)
+            .filter(
+                TestRunModel.api_id == api.id,
+                TestRunModel.mapping_to == request_data["mapped_to_type"],
+                TestRunModel.mapping_id == request_data["mapped_to_id"],
+            )
+        )
+
+        if "search" in request_data.keys():
+            search = request_data["search"]
+            runs_query = runs_query.filter(
+                or_(
+                    cast(TestRunModel.id, String).like(f"%{search}%"),
+                    TestRunModel.uid.like(f"%{search}%"),
+                    TestRunModel.title.like(f"%{search}%"),
+                    TestRunModel.notes.like(f"%{search}%"),
+                    TestRunModel.bugs.like(f"%{search}%"),
+                    TestRunModel.fixes.like(f"%{search}%"),
+                    TestRunModel.report.like(f"%{search}%"),
+                    TestRunModel.result.like(f"%{search}%"),
+                    cast(TestRunModel.created_at, String).like(f"%{search}%"),
+                    TestRunConfigModel.title.like(f"%{search}%"),
+                    TestRunConfigModel.provision_type.like(f"%{search}%"),
+                    TestRunConfigModel.git_repo_ref.like(f"%{search}%"),
+                    TestRunConfigModel.context_vars.like(f"%{search}%"),
+                    TestRunConfigModel.environment_vars.like(f"%{search}%"),
+                    TestRunConfigModel.provision_guest.like(f"%{search}%"),
+                    TestRunConfigModel.provision_guest_port.like(f"%{search}%"),
+                )
+            )
+
+        runs = runs_query.order_by(TestRunModel.created_at.desc()).all()
+        runs = [x.as_dict(full_data=True) for x in runs]
+        api_response.set_data(runs)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        create a new test run
+        """
+        request_data = request.get_json(force=True)
+        mandatory_fields = ["api-id", "title", "notes", "test-run-config", "mapped_to_type", "mapped_to_id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        # Test Run Configuration
+        test_config_ret, test_config_status = add_test_run_config(
+            dbi, request_data["test-run-config"], user, api_response
+        )
+        if test_config_status not in [OK_STATUS, CREATED_STATUS]:
+            return test_config_ret, test_config_status
+        if isinstance(test_config_ret, dict):
+            tc_id = test_config_ret.get("id")
+            test_config = dbi.session.query(TestRunConfigModel).filter(TestRunConfigModel.id == tc_id).one()
+        else:
+            test_config = test_config_ret
+
+        # Test Run
+        title = request_data["title"].strip()
+        notes = request_data["notes"].strip()
+        mapping_to = str(request_data["mapped_to_type"]).strip()
+        mapping_id = request_data["mapped_to_id"]
+
+        # Check mandatory fields
+        if title == "":
+            api_response.set_message("Missing title")
+            return api_response.return_bad_request()
+        if mapping_to == "":
+            api_response.set_message("Missing mapping_to")
+            return api_response.return_bad_request()
+        if mapping_id == "":
+            api_response.set_message("Missing mapping_id")
+            return api_response.return_bad_request()
+
+        mapping_model = None
+        if mapping_to == ApiTestCaseModel.__tablename__:
+            mapping_model = ApiTestCaseModel
+        elif mapping_to == SwRequirementTestCaseModel.__tablename__:
+            mapping_model = SwRequirementTestCaseModel
+        elif mapping_to == TestSpecificationTestCaseModel.__tablename__:
+            mapping_model = TestSpecificationTestCaseModel
+        else:
+            api_response.set_message("Invalid mapping_to")
+            return api_response.return_bad_request()
+
+        try:
+            mapping = dbi.session.query(mapping_model).filter(mapping_model.id == mapping_id).one()
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the mapping to {mapping_to} id {mapping_id}")
+            return api_response.return_not_found()
+
+        # Create the Test Config only if the Test Run data is consistent
+        dbi.session.commit()
+        new_test_run = TestRunModel(api, title, notes, test_config, mapping_to, mapping_id, user)
+
+        if "report" in request_data.keys():
+            new_test_run.report = request_data["report"]
+        if "result" in request_data.keys():
+            new_test_run.result = request_data["result"]
+        if "status" in request_data.keys():
+            new_test_run.status = request_data["status"]
+
+        dbi.session.add(new_test_run)
+        dbi.session.commit()
+
+        # Start the detached process to run the test async
+        if new_test_run.status == "created":
+            # Add --unit-test argument if using test database (for unit testing)
+            current_db = get_db_name()
+            unit_test_arg = "--unit-test" if current_db == "test" else ""
+
+            cmd = (
+                f"python3 {os.path.join(currentdir, 'testrun.py')} --id {new_test_run.id} "
+                f"{unit_test_arg} &> {TEST_RUNS_BASE_DIR}/{new_test_run.uid}.log &"
+            )
+
+            if current_db == "test":
+                logger.info(
+                    f"Starting TestRunner for test run {new_test_run.id} with "
+                    f"--unit-test flag (database: {current_db})"
+                )
+            else:
+                logger.info(f"Starting TestRunner for test run {new_test_run.id} (database: {current_db})")
+
+            os.system(cmd)
+
+            # Notification
+            notification = (
+                f"{user.username} started a Test Run for Test Case "
+                f"{mapping.test_case.title} as part of the sw component "
+                f"{api.api}, library {api.library}"
+            )
+            notifications = NotificationModel(
+                api,
+                "info",
+                f"Test Run for {api.api} has been requested",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+
+        ret = new_test_run.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def put(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        update an existing test run
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["api-id", "id", "bugs", "fixes", "notes", "mapped_to_type", "mapped_to_id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        mapping_model = None
+        mapping_to = request_data["mapped_to_type"]
+        mapping_id = request_data["mapped_to_id"]
+        if mapping_to == ApiTestCaseModel.__tablename__:
+            mapping_model = ApiTestCaseModel
+        elif mapping_to == SwRequirementTestCaseModel.__tablename__:
+            mapping_model = SwRequirementTestCaseModel
+        elif mapping_to == TestSpecificationTestCaseModel.__tablename__:
+            mapping_model = TestSpecificationTestCaseModel
+        else:
+            api_response.set_message("Invalid mapping_to")
+            return api_response.return_bad_request()
+
+        try:
+            mapping = dbi.session.query(mapping_model).filter(mapping_model.id == mapping_id).one()
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the mapping to {mapping_to} id {mapping_id}")
+            return api_response.return_not_found()
+
+        try:
+            run = (
+                dbi.session.query(TestRunModel)
+                .filter(
+                    TestRunModel.api_id == api.id,
+                    TestRunModel.id == request_data["id"],
+                    TestRunModel.mapping_to == mapping_to,
+                    TestRunModel.mapping_id == mapping_id,
+                )
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the test run id {request_data['id']}")
+            return api_response.return_not_found()
+
+        test_run_modified = False
+        if run.bugs != request_data["bugs"]:
+            test_run_modified = True
+            run.bugs = request_data["bugs"]
+
+        if run.fixes != request_data["fixes"]:
+            test_run_modified = True
+            run.fixes = request_data["fixes"]
+
+        if run.notes != request_data["notes"]:
+            test_run_modified = True
+            run.notes = request_data["notes"]
+
+        if test_run_modified:
+            dbi.session.commit()
+
+            # Notification
+            notification = (
+                f"{user.username} modified a Test Run for Test Case "
+                f"{mapping.test_case.title} as part of the sw component "
+                f"{api.api}, library {api.library}.\nBugs: {run.bugs}"
+            )
+            notifications = NotificationModel(
+                api,
+                "info",
+                f"Test Run for {api.api} has been modified",
+                notification,
+                f"[{user.id}]",
+                f"/mapping/{api.id}",
+            )
+            dbi.session.add(notifications)
+            dbi.session.commit()
+
+        ret = run.as_dict()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def delete(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        delete an existing test run
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["api-id", "id", "mapped_to_type", "mapped_to_id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        mapping_model = None
+        mapping_to = request_data["mapped_to_type"]
+        mapping_id = request_data["mapped_to_id"]
+        if mapping_to == ApiTestCaseModel.__tablename__:
+            mapping_model = ApiTestCaseModel
+        elif mapping_to == SwRequirementTestCaseModel.__tablename__:
+            mapping_model = SwRequirementTestCaseModel
+        elif mapping_to == TestSpecificationTestCaseModel.__tablename__:
+            mapping_model = TestSpecificationTestCaseModel
+        else:
+            api_response.set_message("Invalid mapping_to")
+            return api_response.return_bad_request()
+
+        try:
+            mapping = dbi.session.query(mapping_model).filter(mapping_model.id == mapping_id).one()
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the mapping to {mapping_to} id {mapping_id}")
+            return api_response.return_not_found()
+
+        try:
+            run = (
+                dbi.session.query(TestRunModel)
+                .filter(
+                    TestRunModel.api_id == api.id,
+                    TestRunModel.id == request_data["id"],
+                    TestRunModel.mapping_to == mapping_to,
+                    TestRunModel.mapping_id == mapping_id,
+                )
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the test run id {request_data['id']}")
+            return api_response.return_not_found()
+
+        run_dict = run.as_dict()
+        dbi.session.delete(run)
+        dbi.session.commit()
+
+        # Remove folder
+        run_path = os.path.join(TEST_RUNS_BASE_DIR, run_dict["uid"])
+        if os.path.exists(run_path):
+            if os.path.isdir(run_path):
+                shutil.rmtree(run_path)
+
+        # Remove log file
+        log_file = os.path.join(TEST_RUNS_BASE_DIR, f"{run_dict['uid']}.log")
+        if os.path.exists(log_file):
+            os.remove(log_file)
+
+        # Notification
+        notification = (
+            f"{user.username} deleted a Test Run for Test Case "
+            f"{mapping.test_case.title} as part of the sw component "
+            f"{api.api}, library {api.library}"
+        )
+        notifications = NotificationModel(
+            api, "info", f"Test Run for {api.api} has been removed", notification, f"[{user.id}]", f"/mapping/{api.id}"
+        )
+        dbi.session.add(notifications)
+        dbi.session.commit()
+        api_response.set_data(run_dict)
+        return api_response.return_ok()
+
+
+class TestRunLog(Resource):
+    route = "/mapping/api/test-run/log"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get the log of a test run
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            run = (
+                dbi.session.query(TestRunModel)
+                .filter(
+                    TestRunModel.api_id == api.id,
+                    TestRunModel.id == request_data["id"],
+                )
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the test run id {request_data['id']}")
+            return api_response.return_not_found()
+
+        log_exec = ""
+        log_exec_path = os.path.join(TEST_RUNS_BASE_DIR, f"{run.uid}.log")
+
+        if run.test_run_config.plugin == TestRunner.TMT:
+            log_exec_path = os.path.join(TEST_RUNS_BASE_DIR, run.uid, "log.txt")
+
+        if os.path.exists(log_exec_path):
+            f = open(log_exec_path, "r")
+            log_exec = f.read()
+            f.close()
+        else:
+            log_exec = "File not found."
+
+        # List files in the TMT_PLAN_DATA dir
+        artifacts = []
+        if os.path.exists(os.path.join(TEST_RUNS_BASE_DIR, run.uid, "api", "tmt-plan", "data")):
+            artifacts = os.listdir(os.path.join(TEST_RUNS_BASE_DIR, run.uid, "api", "tmt-plan", "data"))
+
+        ret = run.as_dict()
+        ret["artifacts"] = artifacts
+        ret["log_exec"] = log_exec
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class TestRunArtifacts(Resource):
+    route = "/mapping/api/test-run/artifacts"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get the artifacts of a test run
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "artifact", "id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            run = (
+                dbi.session.query(TestRunModel)
+                .filter(
+                    TestRunModel.api_id == api.id,
+                    TestRunModel.id == request_data["id"],
+                )
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the test run id {request_data['id']}")
+            return api_response.return_not_found()
+
+        # List files in the TMT_PLAN_DATA dir
+        artifacts_path = os.path.join(TEST_RUNS_BASE_DIR, run.uid, "api", "tmt-plan", "data")
+        artifacts = os.listdir(artifacts_path)
+        if request_data["artifact"] not in artifacts:
+            api_response.set_message(f"Unable to find the artifact {request_data['artifact']}")
+            return api_response.return_not_found()
+
+        return send_from_directory(artifacts_path, request_data["artifact"])
+
+
+class TestRunArtifactContent(Resource):
+    route = "/mapping/api/test-run/artifact-content"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get the content of an artifact
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["api-id", "artifact", "id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        try:
+            run = (
+                dbi.session.query(TestRunModel)
+                .filter(
+                    TestRunModel.api_id == api.id,
+                    TestRunModel.id == request_data["id"],
+                )
+                .one()
+            )
+        except NoResultFound:
+            api_response.set_message(f"Unable to find the test run id {request_data['id']}")
+            return api_response.return_not_found()
+
+        artifacts_path = os.path.join(TEST_RUNS_BASE_DIR, run.uid, "api", "tmt-plan", "data")
+        artifacts = os.listdir(artifacts_path)
+        if request_data["artifact"] not in artifacts:
+            api_response.set_message(f"Unable to find the artifact {request_data['artifact']}")
+            return api_response.return_not_found()
+
+        file_path = os.path.join(artifacts_path, request_data["artifact"])
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            api_response.set_data({"content": content})
+            return api_response.return_ok()
+        except OSError as e:
+            api_response.set_message(f"Unable to read the artifact {request_data['artifact']}: {str(e)}")
+            return api_response.return_server_error()
+
+
+class TestRunPluginPresets(Resource):
+    route = "/mapping/api/test-run-plugins-presets"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get the plugin presets
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+        mandatory_fields = ["api-id", "plugin"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        plugin = request_data["plugin"]
+
+        if os.path.exists(TESTRUN_PRESET_FILEPATH):
+            try:
+                presets = parse_config(path=TESTRUN_PRESET_FILEPATH)
+                if plugin in presets.keys():
+                    if isinstance(presets[plugin], list):
+                        ret = [x["name"] for x in presets[plugin] if "name" in x.keys()]
+                        api_response.set_data(ret)
+                        return api_response.return_ok()
+            except Exception as e:
+                api_response.set_message(f"Unable to read {TESTRUN_PRESET_FILEPATH}")
+                api_response.set_exception(e)
+                return api_response.return_server_error()
+        api_response.set_data([])
+        return api_response.return_ok()
+
+
+class ExternalTestRuns(Resource):
+    route = "/mapping/api/test-runs/external"
+
+    @api_response_decorator
+    @check_api_user_read_permission
+    def get(
+        self,
+        api: ApiModel = None,
+        user: UserModel = None,
+        dbi: db_orm.DbInterface = None,
+        api_response: ApiResponse = None,
+    ):
+        """
+        get external test runs
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        PARAM_DATE_FORMAT = "%Y-%m-%d"
+        GITLAB_CI_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+        KERNEL_CI_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
+        mandatory_fields = ["api-id", "plugin", "preset"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        ret = []
+        ret_pipelines = []
+        all_pipelines = []
+        filtered_pipelines = []
+        plugin = request_data["plugin"].strip()
+        preset = request_data["preset"].strip()
+        params_strings = []
+        params = {}
+
+        preset_config = None
+
+        if preset:
+            presets = parse_config(path=TESTRUN_PRESET_FILEPATH)
+
+            if plugin in presets.keys():
+                tmp = [x for x in presets[plugin] if x["name"] == preset]
+                if tmp:
+                    # Init the config with the preset
+                    # Values from test_run_config will override preset values
+                    preset_config = tmp[0]
+
+            if not preset_config:
+                api_response.set_message("Preset not found")
+                return api_response.return_not_found()
+
+            if "params" in request_data.keys():
+                params_strings = request_data["params"].split(";")
+                params_strings = [x for x in params_strings if "=" in x]
+                for param_string in params_strings:
+                    k = param_string.split("=")[0].strip()
+                    v = param_string.split("=")[1].strip()
+                    if k and v:
+                        params[k] = v
+                        # Override preset config with params
+                        preset_config[k] = v
+
+            if plugin == TestRunner.GITLAB_CI:
+                gitlab_ci_mandatory_fields = ["private_token", "project_id", "url"]
+
+                # Skip pending pipelines from the list
+                gitlab_ci_valid_status = ["success", "failed"]
+
+                wrong_fields = get_wrong_mandatory_fields(gitlab_ci_mandatory_fields, preset_config)
+                if len(wrong_fields) > 0:
+                    api_response.set_missing_fields(wrong_fields)
+                    return api_response.return_bad_request_missing_fields()
+
+                gl = gitlab.Gitlab(url=preset_config["url"], private_token=preset_config["private_token"])
+                gl.auth()
+                project = gl.projects.get(id=preset_config["project_id"])
+
+                job = None
+                ref = None
+                stage = None
+
+                if "job" in preset_config.keys():
+                    if preset_config["job"]:
+                        job = preset_config["job"]
+
+                if "ref" in preset_config.keys():
+                    if preset_config["ref"]:
+                        ref = preset_config["ref"]
+                elif "git_repo_ref" in preset_config.keys():
+                    if preset_config["git_repo_ref"]:
+                        ref = preset_config["git_repo_ref"]
+
+                if "stage" in preset_config.keys():
+                    if preset_config["stage"]:
+                        stage = preset_config["stage"]
+
+                if ref:
+                    all_pipelines = project.pipelines.list(ref=ref)
+                else:
+                    all_pipelines = project.pipelines.list()
+
+                # Filter
+                all_pipelines = [x for x in all_pipelines if x.status in gitlab_ci_valid_status]
+                if not all_pipelines:
+                    api_response.set_data([])
+                    return api_response.return_ok()
+
+                pipeline_attrs = all_pipelines[0].__dict__["_attrs"].keys()
+                params_pipelines = all_pipelines
+                filtered_by_params = False
+                filtered_pipelines = []
+
+                if params.keys():
+                    for k, v in params.items():
+                        if k in pipeline_attrs:
+                            params_pipelines = [x for x in params_pipelines if x.__dict__["_attrs"][k] == v]
+                            filtered_by_params = True
+
+                    if "updated_after" in params.keys():
+                        if params["updated_after"]:
+                            try:
+                                compare_date = datetime.datetime.strptime(params["updated_after"], PARAM_DATE_FORMAT)
+                                params_pipelines = [
+                                    x
+                                    for x in params_pipelines
+                                    if datetime.datetime.strptime(x.updated_at, GITLAB_CI_DATE_FORMAT) >= compare_date
+                                ]
+                                filtered_by_params = True
+                            except ValueError as e:
+                                logger.error(f"ExternalTestRuns Exception at gitlab ci {e}")
+                                pass
+
+                    if "updated_before" in params.keys():
+                        if params["updated_before"]:
+                            try:
+                                compare_date = datetime.datetime.strptime(params["updated_before"], PARAM_DATE_FORMAT)
+                                params_pipelines = [
+                                    x
+                                    for x in params_pipelines
+                                    if datetime.datetime.strptime(x.updated_at, GITLAB_CI_DATE_FORMAT) <= compare_date
+                                ]
+                                filtered_by_params = True
+                            except ValueError as e:
+                                logger.error(f"ExternalTestRuns Exception at gitlab ci {e}")
+                                pass
+
+                if not filtered_by_params:
+                    params_pipelines = all_pipelines
+
+                if stage:
+                    for pipeline in params_pipelines:
+                        pipeline_jobs = pipeline.jobs.list()
+                        for pipeline_job in pipeline_jobs:
+                            if pipeline_job.__dict__["_attrs"]["stage"] == stage:
+                                if job:
+                                    if pipeline_job.__dict__["_attrs"]["name"] == job:
+                                        filtered_pipelines.append(pipeline)
+                                        break
+                                else:
+                                    filtered_pipelines.append(pipeline)
+                                    break
+                else:
+                    for pipeline in params_pipelines:
+                        pipeline_jobs = pipeline.jobs.list()
+                        for pipeline_job in pipeline_jobs:
+                            if job:
+                                if pipeline_job.__dict__["_attrs"]["name"] == job:
+                                    filtered_pipelines.append(pipeline)
+                                    break
+                            else:
+                                filtered_pipelines.append(pipeline)
+                                break
+
+                for p in filtered_pipelines:
+                    ret.append(
+                        {
+                            "created_at": p.created_at,
+                            "id": p.id,
+                            "project": project.name,
+                            "ref": p.ref,
+                            "details": p.name,
+                            "status": "pass" if p.status == "success" else "fail",
+                            "web_url": p.web_url,
+                        }
+                    )
+
+            if plugin == TestRunner.GITHUB_ACTIONS:
+                github_actions_mandatory_fields = ["private_token", "url"]
+                ref = None
+
+                wrong_fields = get_wrong_mandatory_fields(github_actions_mandatory_fields, preset_config)
+                if len(wrong_fields) > 0:
+                    api_response.set_missing_fields(wrong_fields)
+                    return api_response.return_bad_request_missing_fields()
+
+                if preset_config["url"].endswith("/"):
+                    preset_config["url"] = preset_config["url"][:-1]
+                if preset_config["url"].endswith(".git"):
+                    preset_config["url"] = preset_config["url"][:-4]
+
+                url_split = preset_config["url"].split("/")
+                if len(url_split) < 2:
+                    api_response.set_message("Github repository url is not valid")
+                    return api_response.return_bad_request()
+
+                owner = url_split[-2]
+                repo = url_split[-1]
+                workflows_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs?"
+
+                if "ref" in preset_config.keys():
+                    if preset_config["ref"]:
+                        ref = preset_config["ref"]
+                elif "git_repo_ref" in preset_config.keys():
+                    if preset_config["git_repo_ref"]:
+                        ref = preset_config["git_repo_ref"]
+
+                if ref:
+                    workflows_url += f"&branch={ref}"
+
+                if "workflow_id" in preset_config.keys():
+                    workflows_url += f"&workflow_id={preset_config['workflow_id']}"
+
+                if params_strings:
+                    workflows_url += "&" + "&".join(params_strings)
+
+                headers = {
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {preset_config['private_token']}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                }
+
+                try:
+                    request_params = urllib.request.Request(url=workflows_url, headers=headers)
+
+                    response_data = urllib.request.urlopen(request_params).read()
+                    content = json.loads(response_data.decode("utf-8"))
+                except Exception as e:
+                    api_response.set_message(f"Unable to read workflows: {e}")
+                    return api_response.return_bad_request()
+                else:
+                    ret_pipelines = content["workflow_runs"]
+
+                for p in ret_pipelines:
+                    ret.append(
+                        {
+                            "created_at": p["created_at"],
+                            "id": p["id"],
+                            "project": f"{owner}/{repo}",
+                            "ref": p["head_branch"],
+                            "details": p["name"],
+                            "status": "pass" if p["conclusion"] == "success" else "fail",
+                            "web_url": f"{preset_config['url']}/actions/runs/{p['id']}",
+                        }
+                    )
+
+            if plugin == TestRunner.KERNEL_CI:
+                NODES_ENDPOINT = "nodes"
+                dashboard_base_url = "https://dashboard.kernelci.org/tree/unknown/test/maestro:"
+                kernel_ci_mandatory_fields = ["private_token", "url"]
+
+                wrong_fields = get_wrong_mandatory_fields(kernel_ci_mandatory_fields, preset_config)
+                if len(wrong_fields) > 0:
+                    api_response.set_missing_fields(wrong_fields)
+                    return api_response.return_bad_request_missing_fields()
+
+                if preset_config["url"].endswith("/"):
+                    preset_config["url"] = preset_config["url"][:-1]
+
+                # We use double underscore in the param key for kernelCI
+                # that should be replace with a . when used in the kernelCI API
+                for i in range(len(params_strings)):
+                    kv = params_strings[i].split("=")
+                    k = kv[0]
+                    v = kv[1]
+                    if k == "created_after":
+                        try:
+                            compare_date = datetime.datetime.strptime(params["created_after"], PARAM_DATE_FORMAT)
+                            compare_date_str = compare_date.strftime(KERNEL_CI_DATE_FORMAT)
+                            params_strings[i] = f"created__gt={compare_date_str}"
+                        except ValueError as e:
+                            logger.error(f"ExternalTestRuns Exception at KernelCI {e}")
+                            pass
+                    elif k == "created_before":
+                        try:
+                            compare_date = datetime.datetime.strptime(params["created_before"], PARAM_DATE_FORMAT)
+                            compare_date_str = compare_date.strftime(KERNEL_CI_DATE_FORMAT)
+                            params_strings[i] = f"created__lt={compare_date_str}"
+                        except ValueError as e:
+                            logger.error(f"ExternalTestRuns Exception at KernelCI {e}")
+                            pass
+                    else:
+                        params_strings[i] = f"{k.replace('__', '.')}={v}"
+
+                kernel_ci_url = f"{preset_config['url']}/{NODES_ENDPOINT}?kind=test&state=done"
+                if params_strings:
+                    kernel_ci_url += f"&{'&'.join(params_strings)}"
+
+                headers = {
+                    "Authorization": f"Bearer {preset_config['private_token']}",
+                }
+
+                try:
+                    kernel_ci_request = urllib.request.Request(url=kernel_ci_url, headers=headers)
+
+                    response_data = urllib.request.urlopen(kernel_ci_request).read()
+                    content = json.loads(response_data.decode("utf-8"))
+                except Exception as e:
+                    api_response.set_message(f"Unable to read workflows: {e}")
+                    return api_response.return_bad_request()
+                else:
+                    ret_pipelines = content["items"]
+
+                for p in ret_pipelines:
+                    project = p["data"]["kernel_revision"]["tree"]
+                    branch = p["data"]["kernel_revision"]["branch"]
+                    ret.append(
+                        {
+                            "created_at": p["created"],
+                            "id": p["id"],
+                            "project": project,
+                            "ref": branch,
+                            "details": p["name"],
+                            "status": "pass" if p["result"] == "pass" else "fail",
+                            "web_url": f"{dashboard_base_url}{p['id']}",
+                        }
+                    )
+
+            if plugin == TestRunner.LAVA:
+                JOBS_ENDPOINT = "jobs"
+                lava_mandatory_fields = ["private_token", "url"]
+                lava_filter_keys = ["id", "project", "ref", "details"]
+
+                headers = {
+                    "Accept": "application/json",
+                }
+
+                wrong_fields = get_wrong_mandatory_fields(lava_mandatory_fields, preset_config)
+                if len(wrong_fields) > 0:
+                    api_response.set_missing_fields(wrong_fields)
+                    return api_response.return_bad_request_missing_fields()
+
+                if preset_config["url"].endswith("/"):
+                    preset_config["url"] = preset_config["url"][:-1]
+
+                lava_url = f"{preset_config['url']}/{JOBS_ENDPOINT}/?state=Finished&health=Complete"
+
+                if "page" in params.keys():
+                    lava_url += f"&page={params['page']}"
+
+                lava_request = urllib.request.Request(url=lava_url, headers=headers)
+
+                try:
+                    with urllib.request.urlopen(lava_request) as response:
+                        response_data = response.read()
+                        content = json.loads(response_data.decode("utf-8"))
+                except urllib.error.HTTPError as e:
+                    error_content = e.read().decode()
+                    api_response.set_message(f"HTTP Error: {e.code} - {e.reason} - {error_content}")
+                    return api_response.return_forbidden()
+                except urllib.error.URLError as e:
+                    api_response.set_message(f"URL Error: {e.reason}")
+                    return api_response.return_forbidden()
+                except Exception as e:
+                    api_response.set_message(f"Unexpected error: {e}")
+                    return api_response.return_forbidden()
+
+                ret_pipelines = content["results"]
+
+                for p in ret_pipelines:
+
+                    # Project and branch
+                    try:
+                        lava_definition = parse_config(data=p["definition"])
+                    except Exception as exc:
+                        logger.error(f"Error reading LAVA job definition: {exc}")
+                        lava_definition = None
+
+                    branch = "default"
+                    project = ""
+
+                    if lava_definition:
+                        if "actions" in lava_definition.keys():
+                            for iAct in lava_definition["actions"]:
+                                if "test" in iAct.keys():
+                                    if "definitions" in iAct["test"].keys():
+                                        if iAct["test"]["definitions"]:
+                                            lava_test_definition = iAct["test"]["definitions"]
+                                            if isinstance(lava_test_definition, list):
+                                                branch = lava_test_definition[0].get("branch", "default")
+                                                project = lava_test_definition[0].get("name", "")
+
+                    tmp_test_run = {
+                        "created_at": p["submit_time"],
+                        "id": p["id"],
+                        "project": project,
+                        "ref": branch,
+                        "details": p["description"],
+                        "status": None,
+                        "web_url": f"{preset_config['url'].split('/api/')[0]}/scheduler/job/{p['id']}",
+                    }
+
+                    # Filter keys for the ones already have the data
+                    # status(reuslt) can be evaluated only after reading
+                    # the details endpoint
+                    skip_test_run = False
+                    for filter_key in params.keys():
+                        if filter_key in lava_filter_keys:
+                            if str(params[filter_key]).lower() not in str(tmp_test_run[filter_key]).lower():
+                                skip_test_run = True
+                                continue
+                    if skip_test_run:
+                        continue
+
+                    # Extract test results
+                    try:
+                        lava_test_run_request = urllib.request.Request(
+                            url=f"{preset_config['url']}/{JOBS_ENDPOINT}/{p['id']}/tests/", headers=headers
+                        )
+                        response_data = urllib.request.urlopen(lava_test_run_request).read()
+                        content = json.loads(response_data.decode("utf-8"))
+                        if "results" in content.keys():
+                            lava_test_results = "pass" if all(
+                                d.get("result") == "pass" for d in content["results"]
+                            ) else "fail"
+                        else:
+                            lava_test_results = "unknown"
+                    except Exception as e:
+                        logger.error(f"Unable to read LAVA job {p['id']} results: {e}")
+                        lava_test_results = "unknown"
+
+                    # Update test run status
+                    tmp_test_run["status"] = lava_test_results
+
+                    # Filter on status(result) if required
+                    if "status" in params.keys():
+                        if params["status"]:
+                            if str(params["status"]).lower() not in str(tmp_test_run["status"]).lower():
+                                continue
+
+                    ret.append(tmp_test_run)
+
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class AdminTestRunPluginsPresets(Resource):
+    route = "/admin/test-run-plugins-presets"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get the test run plugins presets
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {"content": ""}
+
+        mandatory_fields = ["token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        if os.path.exists(TESTRUN_PRESET_FILEPATH):
+            try:
+                f = open(TESTRUN_PRESET_FILEPATH, "r")
+                fc = f.read()
+                f.close()
+                ret["content"] = fc
+            except Exception:
+                logger.error(f"Unable to read {TESTRUN_PRESET_FILEPATH}")
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        put the test run plugins presets
+        """
+        request_data = request.get_json(force=True)
+        ret = {"content": ""}
+        mandatory_fields = ["content", "user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        # Validate the content
+        try:
+            new_content = parse_config(data=request_data["content"])  # noqa: F841
+        except Exception as exc:
+            api_response.set_message(f"Unable to parse the content: {exc}")
+            return api_response.return_bad_request()
+
+        f = open(TESTRUN_PRESET_FILEPATH, "w")
+        f.write(request_data["content"])
+        f.close()
+        ret["content"] = request_data["content"]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class AdminSettings(Resource):
+    route = "/admin/settings"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get the settings
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {"content": ""}
+
+        mandatory_fields = ["token", "user-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        if os.path.exists(SETTINGS_FILEPATH):
+            try:
+                f = open(SETTINGS_FILEPATH, "r")
+                fc = f.read()
+                f.close()
+                ret["content"] = fc
+            except Exception:
+                logger.error("Unable to read settings file")
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        put the settings
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {"content": ""}
+        mandatory_fields = ["content", "user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        if user.role not in USER_ROLES_MANAGE_USERS:
+            return api_response.return_unauthorized()
+
+        # Validate the content
+        try:
+            new_content = parse_config(data=request_data["content"])  # noqa: F841
+        except Exception as exc:
+            api_response.set_message(f"Unable to parse the content: {exc}")
+            return api_response.return_bad_request()
+
+        f = open(SETTINGS_FILEPATH, "w")
+        f.write(request_data["content"])
+        f.close()
+
+        # Refresh cached settings
+        get_updated_settings()
+
+        ret["content"] = request_data["content"]
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class TraceabilityScannerSettings(Resource):
+    route = "/traceability-scanner/settings"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get the traceability scanner settings
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {"content": ""}
+        mandatory_fields = ["token", "user-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        config = get_user_traceability_scanner_config(user)
+        if config is None:
+            return api_response.return_not_found()
+        ret["content"] = config
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def put(self, api_response: ApiResponse = None):
+        """
+        put the traceability scanner settings
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {"content": ""}
+        mandatory_fields = ["content", "user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        # Validate YAML content
+        try:
+            _ = parse_config(data=request_data["content"])  # noqa: F841
+        except Exception as exc:
+            api_response.set_message(f"Unable to parse the content: {exc}")
+            return api_response.return_bad_request()
+
+        user_config_dir = get_user_config_folder_path(user)
+        user_config_filepath = os.path.join(user_config_dir, "config.yaml")
+        try:
+            f = open(user_config_filepath, "w")
+            f.write(request_data["content"])
+            f.close()
+            ret["content"] = request_data["content"]
+        except Exception as exc:
+            api_response.set_message(f"Unable to write user settings file {user_config_filepath}: {exc}")
+            return api_response.return_bad_request()
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+class TraceabilityScannerScan(Resource):
+    route = "/traceability-scanner/scan"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get the traceability scanner scan
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ret = {"content": []}
+        mandatory_fields = ["user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        user_config_dir = get_user_config_folder_path(user)
+        user_config_filepath = os.path.join(user_config_dir, "config.yaml")
+
+        if os.path.exists(user_config_filepath):
+            """list of traceability scans log files"""
+            log_files = [f for f in os.listdir(user_config_dir) if f.endswith(".log")]
+            ret["content"] = log_files
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def post(self, api_response: ApiResponse = None):
+        """
+        post the traceability scanner scan
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["user-id", "token"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        user_config_dir = get_user_config_folder_path(user)
+        user_config_filepath = os.path.join(user_config_dir, "config.yaml")
+        if not os.path.exists(user_config_filepath):
+            api_response.set_message(f"User configuration file {user_config_filepath} not found")
+            return api_response.return_bad_request()
+
+        config = get_user_traceability_scanner_config(user)
+        if not config:
+            api_response.set_message("Unable to get user traceability scanner config")
+            return api_response.return_bad_request()
+
+        # call repos_scanner.py with the user id and the name of the logfile
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file_path = os.path.join(user_config_dir, f"{timestamp}.log")
+
+        try:
+            log_fh = open(log_file_path, "a")
+            log_fh.write(f"Starting traceability scan for user {user.id} at {timestamp}\n")
+            log_fh.write(f"Configuration: \n{config}\n")
+            log_fh.flush()
+        except Exception as exc:
+            logger.error(f"Unable to open log file {log_file_path}: {exc}")
+            api_response.set_message(f"Unable to open log file {log_file_path}: {exc}")
+            return api_response.return_bad_request()
+
+        # Launch asynchronously without waiting
+        subprocess.Popen(
+            ["python3", "repos_scanner.py", "--userid", str(user.id), "--logfile", f"{timestamp}.log"],
+            cwd=currentdir,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+
+        # Return the status and the logfile name
+        ret = {"status": "success", "logfile": f"{timestamp}.log"}
+        api_response.set_data(ret)
+        return api_response.return_created()
+
+
+class TraceabilityScannerLogs(Resource):
+    route = "/traceability-scanner/logs"
+
+    @api_response_decorator
+    def delete(self, api_response: ApiResponse = None):
+        """
+        delete the traceability scanner logs
+        """
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["user-id", "token", "scan-id"]
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        user_config_dir = get_user_config_folder_path(user)
+        scan_id = str(request_data.get("scan-id", "")).strip()
+        # basic validation to avoid directories/path traversal
+        if not scan_id or scan_id != os.path.basename(scan_id):
+            api_response.set_message(f"Invalid scan ID: {scan_id}")
+            return api_response.return_bad_request()
+        log_file = os.path.join(user_config_dir, scan_id)
+
+        if not os.path.isfile(log_file):
+            api_response.set_message(f"Log file {log_file} not found")
+            return api_response.return_not_found()
+
+        os.remove(log_file)
+        ret = {"status": "success"}
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get the traceability scanner logs
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        mandatory_fields = ["user-id", "token", "scan-id"]
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        dbi = get_db()
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        user_config_dir = get_user_config_folder_path(user)
+        scan_id = str(request_data.get("scan-id", "")).strip()
+        if not scan_id or scan_id != os.path.basename(scan_id):
+            api_response.set_message(f"Invalid scan ID: {scan_id}")
+            return api_response.return_bad_request()
+        log_file = os.path.join(user_config_dir, scan_id)
+
+        if not os.path.isfile(log_file):
+            api_response.set_message(f"Log file {log_file} not found")
+            return api_response.return_not_found()
+
+        try:
+            with open(log_file, "r") as f:
+                content = f.read()
+            ret = {"status": "success", "content": content}
+            api_response.set_data(ret)
+            return api_response.return_ok()
+        except Exception as exc:
+            api_response.set_message(f"Unable to read log file {log_file}: {exc}")
+            return api_response.return_bad_request()
+
+
+class AIHealthCheck(Resource):
+    route = "/ai/health-check"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        ai_prompter = AIPrompter(SETTINGS_CACHE, SETTINGS_LAST_MODIFIED)
+        if not ai_prompter.validate_settings():
+            return api_response.return_precondition_failed()
+
+        if ai_prompter.ai_health_check():
+            api_response.set_data(True)
+            return api_response.return_ok()
+        else:
+            return api_response.return_not_found()
+
+
+class AISuggestTestCaseImplementation(Resource):
+    route = "/ai/suggest/test-case/implementation"
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+             api_response: ApiResponse = None):
+        mandatory_fields = ["spec", "title"]
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        ai_prompter = AIPrompter(SETTINGS_CACHE, SETTINGS_LAST_MODIFIED)
+        if not ai_prompter.validate_settings():
+            return api_response.return_precondition_failed()
+        return ai_prompter.ai_askfor__test_case_implementation(
+            api=api.api,
+            title=request_data["spec"],
+            spec=request_data["spec"],
+            user_id=user.id
+        )
+
+
+class AISuggestTestCaseMetadata(Resource):
+    route = "/ai/suggest/test-case/metadata"
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+             api_response: ApiResponse = None):
+        mandatory_fields = ["spec"]
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        ai_prompter = AIPrompter(SETTINGS_CACHE, SETTINGS_LAST_MODIFIED)
+        if not ai_prompter.validate_settings():
+            return api_response.return_precondition_failed()
+        return ai_prompter.ai_askfor__test_case_metadata(
+            api=api.api,
+            spec=request_data["spec"]
+        )
+
+
+class AISuggestTestSpecificationMetadata(Resource):
+    route = "/ai/suggest/test-specification/metadata"
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+             api_response: ApiResponse = None):
+        mandatory_fields = ["spec"]
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        ai_prompter = AIPrompter(SETTINGS_CACHE, SETTINGS_LAST_MODIFIED)
+        if not ai_prompter.validate_settings():
+            return api_response.return_precondition_failed()
+        return ai_prompter.ai_askfor__test_specification_metadata(
+            api=api.api,
+            spec=request_data["spec"]
+        )
+
+
+class AISuggestSoftwareRequirementMetadata(Resource):
+    route = "/ai/suggest/sw-requirement/metadata"
+
+    @api_response_decorator
+    @check_api_user_write_permission
+    def post(self, api: ApiModel = None, user: UserModel = None, dbi: db_orm.DbInterface = None,
+             api_response: ApiResponse = None):
+        mandatory_fields = ["spec"]
+        request_data = request.get_json(force=True)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        wrong_fields = get_wrong_mandatory_fields(mandatory_fields, request_data)
+        if len(wrong_fields) > 0:
+            api_response.set_missing_fields(wrong_fields)
+            return api_response.return_bad_request_missing_fields()
+
+        ai_prompter = AIPrompter(SETTINGS_CACHE, SETTINGS_LAST_MODIFIED)
+        if not ai_prompter.validate_settings():
+            return api_response.return_precondition_failed()
+        return ai_prompter.ai_askfor__software_requirement_metadata(
+            api=api.api,
+            spec=request_data["spec"]
+        )
+
+
+class CustomActions(Resource):
+    route = "/custom-actions"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """
+        get custom actions
+        """
+        request_data = get_query_string_args(request.args)
+        api_response.set_logger(logger)
+        api_response.set_args(request_data)
+
+        dbi = get_db()
+
+        user = get_active_user_from_request(request_data, dbi.session)
+        if not isinstance(user, UserModel):
+            return api_response.return_unauthorized()
+
+        api_response.set_data(get_custom_actions(user=user))
+        return api_response.return_ok()
+
+
+class Version(Resource):
+    route = "/version"
+
+    @api_response_decorator
+    def get(self, api_response: ApiResponse = None):
+        """Take first row with version definition from pyproject.toml"""
+        ret = {"version": API_VERSION}
+        api_response.set_data(ret)
+        return api_response.return_ok()
+
+
+api.add_resource(Api, Api.route)
+api.add_resource(ApiHistory, ApiHistory.route)
+api.add_resource(ApiNewVersion, ApiNewVersion.route)
+api.add_resource(ApiSpecification, ApiSpecification.route)
+api.add_resource(ApiWritePermissionRequest, ApiWritePermissionRequest.route)
+api.add_resource(Library, Library.route)
+api.add_resource(SPDXApi, SPDXApi.route)
+api.add_resource(HTMLApi, HTMLApi.route)
+api.add_resource(HTMLExportDownload, HTMLExportDownload.route)
+api.add_resource(Document, Document.route)
+api.add_resource(RemoteDocument, RemoteDocument.route)
+api.add_resource(Justification, Justification.route)
+api.add_resource(SwRequirement, SwRequirement.route)
+api.add_resource(TestSpecification, TestSpecification.route)
+api.add_resource(TestCase, TestCase.route)
+api.add_resource(TestCaseLocalFileImplementation, TestCaseLocalFileImplementation.route)
+
+# Mapping
+# - Direct
+api.add_resource(ApiSpecificationsMapping, ApiSpecificationsMapping.route)
+api.add_resource(ApiDynamicViewMapping, ApiDynamicViewMapping.route)
+api.add_resource(ApiDocumentsMapping, ApiDocumentsMapping.route)
+api.add_resource(ApiJustificationsMapping, ApiJustificationsMapping.route)
+api.add_resource(ApiLastCoverage, ApiLastCoverage.route)
+api.add_resource(ApiSwRequirementsMapping, ApiSwRequirementsMapping.route)
+api.add_resource(ApiTestSpecificationsMapping, ApiTestSpecificationsMapping.route)
+api.add_resource(ApiTestCasesMapping, ApiTestCasesMapping.route)
+api.add_resource(TestRunConfig, TestRunConfig.route)
+api.add_resource(TestRun, TestRun.route)
+api.add_resource(ExternalTestRuns, ExternalTestRuns.route)
+api.add_resource(TestRunLog, TestRunLog.route)
+api.add_resource(TestRunArtifacts, TestRunArtifacts.route)
+api.add_resource(TestRunArtifactContent, TestRunArtifactContent.route)
+api.add_resource(TestRunPluginPresets, TestRunPluginPresets.route)
+api.add_resource(AdminTestRunPluginsPresets, AdminTestRunPluginsPresets.route)
+api.add_resource(AdminSettings, AdminSettings.route)
+api.add_resource(TraceabilityScannerSettings, TraceabilityScannerSettings.route)
+api.add_resource(TraceabilityScannerScan, TraceabilityScannerScan.route)
+api.add_resource(TraceabilityScannerLogs, TraceabilityScannerLogs.route)
+api.add_resource(AdminResetUserPassword, AdminResetUserPassword.route)
+
+# - Import
+api.add_resource(SwRequirementImport, SwRequirementImport.route)
+api.add_resource(TestCaseGenerateJson, TestCaseGenerateJson.route)
+api.add_resource(TestCaseImport, TestCaseImport.route)
+
+# - Indirect
+api.add_resource(SwRequirementSwRequirementsMapping, SwRequirementSwRequirementsMapping.route)
+api.add_resource(SwRequirementTestSpecificationsMapping, SwRequirementTestSpecificationsMapping.route)
+api.add_resource(SwRequirementTestCasesMapping, SwRequirementTestCasesMapping.route)
+api.add_resource(TestSpecificationTestCasesMapping, TestSpecificationTestCasesMapping.route)
+api.add_resource(DocumentDocumentMapping, DocumentDocumentMapping.route)
+
+# History
+api.add_resource(MappingHistory, MappingHistory.route)
+api.add_resource(CheckSpecification, CheckSpecification.route)
+api.add_resource(FixNewSpecificationWarnings, FixNewSpecificationWarnings.route)
+
+# Testing Support
+api.add_resource(TestingSupportInitDb, TestingSupportInitDb.route)
+
+# Usage
+api.add_resource(MappingUsage, MappingUsage.route)
+# Comments
+api.add_resource(Comment, Comment.route)
+# Fork
+api.add_resource(ForkApiSwRequirement, ForkApiSwRequirement.route)
+api.add_resource(ForkSwRequirementSwRequirement, ForkSwRequirementSwRequirement.route)
+api.add_resource(ForkApiDocument, ForkApiDocument.route)
+api.add_resource(ForkDocumentDocument, ForkDocumentDocument.route)
+api.add_resource(ForkApiTestSpecification, ForkApiTestSpecification.route)
+api.add_resource(ForkSwRequirementTestSpecification, ForkSwRequirementTestSpecification.route)
+api.add_resource(ForkApiTestCase, ForkApiTestCase.route)
+api.add_resource(ForkSwRequirementTestCase, ForkSwRequirementTestCase.route)
+api.add_resource(ForkTestSpecificationTestCase, ForkTestSpecificationTestCase.route)
+api.add_resource(ForkApiJustification, ForkApiJustification.route)
+
+api.add_resource(User, User.route)
+api.add_resource(UserApis, UserApis.route)
+api.add_resource(UserEnable, UserEnable.route)
+api.add_resource(UserLogin, UserLogin.route)
+api.add_resource(UserNotifications, UserNotifications.route)
+api.add_resource(UserPermissionsApi, UserPermissionsApi.route)
+api.add_resource(UserPermissionsApiCopy, UserPermissionsApiCopy.route)
+api.add_resource(UserResetPassword, UserResetPassword.route)
+api.add_resource(UserRole, UserRole.route)
+api.add_resource(UserSignin, UserSignin.route)
+api.add_resource(UserSshKey, UserSshKey.route)
+api.add_resource(UserFiles, UserFiles.route)
+api.add_resource(UserFileFolder, UserFileFolder.route)
+api.add_resource(UserFileContent, UserFileContent.route)
+api.add_resource(Alert, Alert.route)
+api.add_resource(Testing, Testing.route)
+api.add_resource(Version, Version.route)
+
+# AI
+api.add_resource(AIHealthCheck, AIHealthCheck.route)
+api.add_resource(AISuggestTestCaseMetadata, AISuggestTestCaseMetadata.route)
+api.add_resource(AISuggestTestCaseImplementation, AISuggestTestCaseImplementation.route)
+api.add_resource(AISuggestTestSpecificationMetadata, AISuggestTestSpecificationMetadata.route)
+api.add_resource(AISuggestSoftwareRequirementMetadata, AISuggestSoftwareRequirementMetadata.route)
+
+# Custom Actions
+api.add_resource(CustomActions, CustomActions.route)
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--testing", default=False, action="store_true", help="Test Api Project using a test database"
+    )
+    args = parser.parse_args()
+
+    env_testing_bool = is_testing_enabled_by_env()
+
+    app.config["TESTING"] = args.testing or env_testing_bool
+    app.config["ENV"] = "local"  # from __main__
+    app.run()
