@@ -1,0 +1,133 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: reqflow-postgres
+    environment:
+      POSTGRES_USER: basil-admin
+      POSTGRES_PASSWORD: ${BASIL_DB_PASSWORD}
+      POSTGRES_DB: basil
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U basil-admin -d basil"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - reqflow-net
+
+  basil-api:
+    build:
+      context: ./repos/BASIL
+      dockerfile: Containerfile-api-debian
+    container_name: reqflow-basil-api
+    environment:
+      BASIL_DB_PORT: ${BASIL_DB_PORT}
+      BASIL_DB_PASSWORD: ${BASIL_DB_PASSWORD}
+      BASIL_ADMIN_PASSWORD: ${BASIL_ADMIN_PASSWORD}
+      BASIL_API_PORT: ${BASIL_API_PORT}
+      BASIL_TESTING: "false"
+      PGHOST: postgres
+    ports:
+      - "${BASIL_API_PORT}:${BASIL_API_PORT}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - basil_api_data:/app/api/user_data
+    networks:
+      - reqflow-net
+
+  basil-frontend:
+    build:
+      context: ./repos/BASIL
+      dockerfile: Containerfile-app
+      args:
+        API_ENDPOINT: http://localhost:${GATEWAY_PORT}/basil/api
+        APP_PORT: ${BASIL_APP_PORT}
+    container_name: reqflow-basil-frontend
+    ports:
+      - "${BASIL_APP_PORT}:${BASIL_APP_PORT}"
+    depends_on:
+      - basil-api
+    networks:
+      - reqflow-net
+
+  graph-engine:
+    build:
+      context: .
+      dockerfile: services/graph-engine/Dockerfile
+    container_name: reqflow-graph-engine
+    environment:
+      GRAPH_ENGINE_PORT: ${GRAPH_ENGINE_PORT}
+      HEDWIG_CG_DB: /data/hedwig-cg
+      BASIL_API_URL: http://basil-api:${BASIL_API_PORT}
+    ports:
+      - "${GRAPH_ENGINE_PORT}:${GRAPH_ENGINE_PORT}"
+    volumes:
+      - graph_engine_data:/data
+      - ./repos:/repos:ro
+      # Mount the validation project
+      - D:/workHome/RuoYi-Cloud:/validation-project:ro
+    depends_on:
+      - basil-api
+    networks:
+      - reqflow-net
+
+  basil-bridge:
+    build:
+      context: ./services/basilext
+      dockerfile: Dockerfile
+    container_name: reqflow-basil-bridge
+    environment:
+      BASIL_BRIDGE_PORT: 8002
+      BASIL_API_URL: http://basil-api:${BASIL_API_PORT}
+      GRAPH_ENGINE_URL: http://graph-engine:${GRAPH_ENGINE_PORT}
+      BASIL_ADMIN_PASSWORD: ${BASIL_ADMIN_PASSWORD}
+    ports:
+      - "8002:8002"
+    depends_on:
+      - basil-api
+      - graph-engine
+    networks:
+      - reqflow-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: reqflow-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - graph-engine
+    networks:
+      - reqflow-net
+
+  gateway:
+    image: nginx:alpine
+    container_name: reqflow-gateway
+    ports:
+      - "${GATEWAY_PORT}:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - basil-api
+      - basil-frontend
+      - graph-engine
+      - basil-bridge
+      - frontend
+    networks:
+      - reqflow-net
+
+volumes:
+  postgres_data:
+  basil_api_data:
+  graph_engine_data:
+  code_repos:
+
+networks:
+  reqflow-net:
+    driver: bridge
