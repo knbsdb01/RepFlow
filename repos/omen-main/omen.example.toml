@@ -1,0 +1,157 @@
+# Omen Configuration (Rust CLI)
+# Copy to omen.toml or .omen/omen.toml and customize
+# Documentation: https://github.com/panbanda/omen
+
+# Exclude patterns (glob) - files/directories to skip during analysis
+exclude_patterns = [
+    # Test files
+    "*_test.rs",
+    "*_test.go",
+    "**/*_test.py",
+    "**/*.test.ts",
+    "**/*.test.js",
+    "**/*.spec.ts",
+    "**/*.spec.js",
+    "tests/**",
+    "test/**",
+    "**/testdata/**",
+
+    # Generated code
+    "**/mocks/**",
+    "**/*.pb.go",
+    "**/*.gen.go",
+    "**/*.generated.*",
+
+    # Dependencies
+    "vendor/**",
+    "node_modules/**",
+    "**/site-packages/**",
+
+    # Build/output directories
+    "target/**",
+    "dist/**",
+    "build/**",
+    "bin/**",
+    ".git/**",
+    ".omen/**",
+
+    # Lock files
+    "Cargo.lock",
+    "go.sum",
+    "package-lock.json",
+    "yarn.lock",
+    "poetry.lock",
+
+    # Documentation (optional - remove if you want to analyze docs)
+    # "**/README.md",
+    # "**/CHANGELOG.md",
+]
+
+# Complexity analysis thresholds
+[complexity]
+# Cyclomatic complexity warning threshold (default: 10)
+cyclomatic_warn = 10
+# Cyclomatic complexity error threshold (default: 20)
+cyclomatic_error = 20
+# Cognitive complexity warning threshold (default: 15)
+cognitive_warn = 15
+# Cognitive complexity error threshold (default: 30)
+cognitive_error = 30
+# Maximum nesting depth (default: 4)
+max_nesting = 4
+
+# Self-Admitted Technical Debt (SATD) detection
+[satd]
+# Categories to detect: design, defect, requirement, test, performance, security
+categories = ["design", "defect", "requirement", "test", "performance", "security"]
+# Custom markers beyond the default (TODO, FIXME, HACK, BUG, etc.)
+custom_markers = []
+
+# Git churn analysis
+[churn]
+# Time period to analyze: "1m", "3m", "6m", "1y", "2y", "all"
+since = "6m"
+# Number of top churned files to report
+top = 20
+
+# Code clone/duplicate detection (MinHash + LSH)
+[duplicates]
+# Minimum tokens for a code block to be considered for clone detection
+min_tokens = 50
+# Minimum similarity threshold (0.0 - 1.0)
+min_similarity = 0.9
+
+# Hotspot analysis (churn x complexity)
+[hotspot]
+# Number of top hotspots to report
+top = 20
+
+# Repository health score
+[score]
+# Fail CI if score is below this threshold (optional)
+# fail_under = 70.0
+
+# Individual component score thresholds
+[score.thresholds]
+complexity = 85.0
+duplication = 65.0
+satd = 80.0
+tdg = 90.0
+coupling = 70.0
+smells = 90.0
+cohesion = 80.0
+
+# Feature flag detection
+[feature_flags]
+# Days before a flag is considered stale
+stale_days = 90
+# Built-in providers to enable. If empty, no built-in detection runs.
+# Available: launchdarkly, flipper, split, unleash, generic, env
+# Example: providers = ["launchdarkly"]
+providers = []
+
+# Custom feature flag providers (for in-house systems)
+# [[feature_flags.custom_providers]]
+# name = "my_feature_system"
+# languages = ["ruby", "python"]
+# query = '''
+# (call
+#   receiver: (constant) @receiver
+#   (#eq? @receiver "Feature")
+#   method: (identifier) @method
+#   (#match? @method "^enabled\\?$")
+#   arguments: (argument_list
+#     .
+#     (simple_symbol) @flag_key))
+# '''
+custom_providers = []
+
+# Semantic search configuration
+[semantic_search]
+# Maximum number of search results to return
+max_results = 20
+# Minimum similarity score (0-1) for results
+min_score = 0.3
+
+# Embedding provider configuration
+# Default: candle (local inference with all-MiniLM-L6-v2)
+[semantic_search.provider]
+type = "candle"
+
+# Alternative: OpenAI embeddings
+# [semantic_search.provider]
+# type = "open_ai"
+# model = "text-embedding-3-small"  # or "text-embedding-3-large", "text-embedding-ada-002"
+# api_key = "sk-..."  # Optional: can also use OPENAI_API_KEY env var
+
+# Alternative: Cohere embeddings
+# [semantic_search.provider]
+# type = "cohere"
+# model = "embed-english-v3.0"  # or "embed-multilingual-v3.0", "embed-english-light-v3.0"
+# api_key = "..."  # Optional: can also use COHERE_API_KEY env var
+
+# Alternative: Voyage AI embeddings (optimized for code)
+# [semantic_search.provider]
+# type = "voyage"
+# model = "voyage-code-2"  # or "voyage-2", "voyage-large-2"
+# api_key = "..."  # Optional: can also use VOYAGE_API_KEY env var

@@ -1,0 +1,22 @@
+{
+  "forbiddenImports": [
+    {
+      "id": "controller-no-repository",
+      "from": "/controllers/",
+      "to": "/repositories/",
+      "severity": "high",
+      "title": "Layer violation detected",
+      "message": "A controller is importing a repository directly. This bypasses the service layer and increases coupling.",
+      "suggestedFix": "Move the repository access into a service, then make the controller depend on that service instead."
+    },
+    {
+      "id": "controller-no-prisma",
+      "from": "/controllers/",
+      "to": "[external] @prisma/client",
+      "severity": "high",
+      "title": "Controller accesses database directly",
+      "message": "A controller is importing Prisma directly. This puts database access inside the HTTP layer.",
+      "suggestedFix": "Move Prisma usage into a service or repository, then inject that dependency into the controller."
+    }
+  ]
+}

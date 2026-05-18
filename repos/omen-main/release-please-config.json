@@ -1,0 +1,42 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "component": "omen"
+    },
+    "plugins/development": {
+      "release-type": "simple",
+      "component": "omen-skills",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "plugins/reporting": {
+      "release-type": "simple",
+      "component": "omen-reporting",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    ".claude-plugin": {
+      "release-type": "simple",
+      "component": "omen-marketplace",
+      "skip-github-release": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "marketplace.json",
+          "jsonpath": "$.metadata.version"
+        }
+      ]
+    }
+  }
+}

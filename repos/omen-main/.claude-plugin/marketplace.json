@@ -1,0 +1,22 @@
+{
+  "name": "omen",
+  "owner": {
+    "name": "Panbanda"
+  },
+  "metadata": {
+    "description": "Code analysis tools and skills for Claude Code",
+    "version": "8.0.0"
+  },
+  "plugins": [
+    {
+      "name": "omen-development",
+      "source": "./plugins/development",
+      "description": "Code analysis skills for active development: find bugs, assess impact, plan refactoring, audit architecture, and more"
+    },
+    {
+      "name": "omen-reporting",
+      "source": "./plugins/reporting",
+      "description": "Generate comprehensive HTML health reports with research-backed insights from specialized domain analysts"
+    }
+  ]
+}

@@ -1,0 +1,675 @@
+# Configuration
+
+Revos uses a project-level configuration file:
+
+```text
+.revos/rules.json
+```
+
+This file defines architecture rules, ignored rules, and ignored specific issues.
+
+---
+
+## Basic example
+
+```json
+{
+  "forbiddenImports": [
+    {
+      "id": "domain-no-fastapi",
+      "from": "**/domain/**",
+      "to": "[external] fastapi",
+      "severity": "high",
+      "title": "Domain depends on FastAPI",
+      "message": "Domain code should not depend on FastAPI.",
+      "suggestedFix": "Move FastAPI-specific code into API routes or adapters."
+    }
+  ]
+}
+```
+
+---
+
+## Configuration fields
+
+### forbiddenImports
+
+`forbiddenImports` is the main rule list.
+
+Each rule says:
+
+```text
+Files matching "from" must not import dependencies matching "to".
+```
+
+Example:
+
+```json
+{
+  "id": "client-no-server",
+  "from": "**/client/**",
+  "to": "**/server/**",
+  "severity": "high",
+  "title": "Client code imports server code",
+  "message": "Client-side code is importing server-side code.",
+  "suggestedFix": "Expose server functionality through an API route or server action."
+}
+```
+
+---
+
+## Rule fields
+
+### id
+
+Unique rule identifier.
+
+Example:
+
+```json
+"id": "client-no-server"
+```
+
+This is used in reports and can also be used by `ignoreRules` or `ignoreIssues`.
+
+---
+
+### from
+
+Source file pattern.
+
+Example:
+
+```json
+"from": "**/domain/**"
+```
+
+This means the rule applies to files inside a `domain` folder.
+
+Other examples:
+
+```json
+"from": "**/app/api/**"
+"from": "**/app/Http/Controllers/**"
+"from": "/components/"
+"from": ".controller.ts"
+```
+
+Revos supports both legacy substring matching and glob-style matching.
+
+---
+
+### to
+
+Forbidden dependency pattern.
+
+This can point to an internal file path:
+
+```json
+"to": "**/repositories/**"
+```
+
+or to an external dependency:
+
+```json
+"to": "[external] fastapi"
+```
+
+Examples:
+
+```json
+"to": "[external] @prisma/client"
+"to": "[external] sqlalchemy"
+"to": "[external] Illuminate\\Support\\Facades\\DB"
+"to": "**/infrastructure/**"
+```
+
+---
+
+### severity
+
+Issue severity.
+
+Supported values:
+
+```text
+low
+medium
+high
+```
+
+Example:
+
+```json
+"severity": "high"
+```
+
+Severity is used by reports and by `--fail-on`.
+
+---
+
+### title
+
+Short issue title shown in terminal and reports.
+
+Example:
+
+```json
+"title": "Domain depends on FastAPI"
+```
+
+---
+
+### message
+
+Explanation of the problem.
+
+Example:
+
+```json
+"message": "Domain code is importing FastAPI. Business logic should not depend on the web framework."
+```
+
+---
+
+### suggestedFix
+
+Suggested fix shown in terminal and reports.
+
+Example:
+
+```json
+"suggestedFix": "Move FastAPI-specific code into API routes, controllers, or adapters."
+```
+
+---
+
+## Pattern matching
+
+Revos supports two matching styles.
+
+### Legacy substring matching
+
+Existing rules such as:
+
+```json
+"from": "/domain/"
+```
+
+still work.
+
+This matches any file path containing:
+
+```text
+/domain/
+```
+
+### Glob-style matching
+
+Revos also supports simple glob patterns.
+
+Examples:
+
+```json
+"from": "**/domain/**"
+"from": "**/api/*.py"
+"to": "**/repositories/**"
+```
+
+Meaning:
+
+```text
+** matches across folders
+* matches within a single path segment
+```
+
+Examples:
+
+```json
+"from": "**/domain/**"
+```
+
+matches:
+
+```text
+app/domain/user.py
+src/app/domain/user.py
+packages/core/domain/user.ts
+```
+
+Example:
+
+```json
+"from": "**/api/*.py"
+```
+
+matches:
+
+```text
+app/api/users.py
+```
+
+but does not match:
+
+```text
+app/api/v1/users.py
+```
+
+because `*` does not cross folder boundaries.
+
+Use `**` when matching multiple folder levels.
+
+---
+
+## External dependencies
+
+Revos represents unresolved packages as external dependencies.
+
+Examples:
+
+```text
+[external] fastapi
+[external] sqlalchemy
+[external] @prisma/client
+[external] Illuminate\Support\Facades\DB
+```
+
+A rule can target external dependencies directly:
+
+```json
+{
+  "id": "domain-no-sqlalchemy",
+  "from": "**/domain/**",
+  "to": "[external] sqlalchemy",
+  "severity": "high",
+  "title": "Domain depends on SQLAlchemy",
+  "message": "Domain code should not depend on SQLAlchemy.",
+  "suggestedFix": "Move SQLAlchemy usage into repositories or infrastructure."
+}
+```
+
+---
+
+## Ignoring rules
+
+Sometimes a project has intentional exceptions.
+
+Revos supports two ignore mechanisms:
+
+```text
+ignoreRules
+ignoreIssues
+```
+
+---
+
+## ignoreRules
+
+Use `ignoreRules` to disable specific rules completely.
+
+Example:
+
+```json
+{
+  "ignoreRules": [
+    "fastapi-api-no-repository"
+  ],
+  "forbiddenImports": [
+    {
+      "id": "fastapi-api-no-repository",
+      "from": "**/api/**",
+      "to": "**/repositories/**",
+      "severity": "medium",
+      "title": "API layer imports repository directly",
+      "message": "A FastAPI route is importing a repository directly.",
+      "suggestedFix": "Move repository usage into an application service."
+    }
+  ]
+}
+```
+
+This disables every issue generated by:
+
+```text
+fastapi-api-no-repository
+```
+
+Use this when a rule does not fit your project.
+
+---
+
+## ignoreIssues
+
+Use `ignoreIssues` to ignore only specific cases.
+
+Example:
+
+```json
+{
+  "ignoreIssues": [
+    {
+      "ruleId": "fastapi-api-no-repository",
+      "from": "**/app/api/health.py",
+      "to": "**/app/repositories/**"
+    }
+  ],
+  "forbiddenImports": [
+    {
+      "id": "fastapi-api-no-repository",
+      "from": "**/app/api/**",
+      "to": "**/app/repositories/**",
+      "severity": "medium",
+      "title": "API layer imports repository directly",
+      "message": "A FastAPI route is importing a repository directly.",
+      "suggestedFix": "Move repository usage into an application service."
+    }
+  ]
+}
+```
+
+This ignores only imports from:
+
+```text
+app/api/health.py
+```
+
+to:
+
+```text
+app/repositories/*
+```
+
+while keeping the rule active everywhere else.
+
+---
+
+## ignoreIssues fields
+
+Each ignored issue can define:
+
+```json
+{
+  "ruleId": "rule-id",
+  "from": "source-pattern",
+  "to": "target-pattern"
+}
+```
+
+All fields are optional.
+
+### Ignore by ruleId only
+
+```json
+{
+  "ignoreIssues": [
+    {
+      "ruleId": "fastapi-api-no-repository"
+    }
+  ],
+  "forbiddenImports": []
+}
+```
+
+This is similar to `ignoreRules`.
+
+### Ignore by source file only
+
+```json
+{
+  "ignoreIssues": [
+    {
+      "from": "**/app/api/health.py"
+    }
+  ],
+  "forbiddenImports": []
+}
+```
+
+This ignores all matching issues from that file.
+
+### Ignore by source and target
+
+```json
+{
+  "ignoreIssues": [
+    {
+      "from": "**/app/api/health.py",
+      "to": "**/app/repositories/**"
+    }
+  ],
+  "forbiddenImports": []
+}
+```
+
+This ignores only a specific dependency direction.
+
+---
+
+## Preset-generated configuration
+
+When running:
+
+```bash
+revos init . --preset fastapi --force
+```
+
+or:
+
+```bash
+revos init . --auto --force
+```
+
+Revos creates:
+
+```text
+.revos/rules.json
+```
+
+with the selected preset rules.
+
+You can edit this file manually after initialization.
+
+For example, you can:
+
+```text
+change severity
+remove rules
+add custom rules
+add ignoreRules
+add ignoreIssues
+```
+
+---
+
+## Example: FastAPI custom config
+
+```json
+{
+  "ignoreIssues": [
+    {
+      "ruleId": "fastapi-api-no-repository",
+      "from": "**/app/api/health.py",
+      "to": "**/app/repositories/**"
+    }
+  ],
+  "forbiddenImports": [
+    {
+      "id": "fastapi-domain-no-fastapi",
+      "from": "**/domain/**",
+      "to": "[external] fastapi",
+      "severity": "high",
+      "title": "Domain depends on FastAPI",
+      "message": "Domain code is importing FastAPI. Business logic should not depend on the web framework.",
+      "suggestedFix": "Move FastAPI-specific code into API routes, controllers, or adapters."
+    },
+    {
+      "id": "fastapi-api-no-repository",
+      "from": "**/api/**",
+      "to": "**/repositories/**",
+      "severity": "medium",
+      "title": "API layer imports repository directly",
+      "message": "A FastAPI route is importing a repository directly. This can mix HTTP concerns with persistence access.",
+      "suggestedFix": "Move repository usage into an application service or use case."
+    }
+  ]
+}
+```
+
+---
+
+## Example: Laravel custom config
+
+```json
+{
+  "ignoreRules": [
+    "laravel-controller-no-cache-facade"
+  ],
+  "ignoreIssues": [
+    {
+      "ruleId": "laravel-controller-no-model",
+      "from": "**/app/Http/Controllers/HealthController.php",
+      "to": "**/app/Models/**"
+    }
+  ],
+  "forbiddenImports": [
+    {
+      "id": "laravel-controller-no-model",
+      "from": "/app/Http/Controllers/",
+      "to": "/app/Models/",
+      "severity": "high",
+      "title": "Laravel controller imports model directly",
+      "message": "A Laravel controller is importing an Eloquent model directly.",
+      "suggestedFix": "Move model access into a service, action, query object, or repository."
+    }
+  ]
+}
+```
+
+---
+
+## Example: Next.js custom config
+
+```json
+{
+  "forbiddenImports": [
+    {
+      "id": "client-no-server",
+      "from": "**/client/**",
+      "to": "**/server/**",
+      "severity": "high",
+      "title": "Client code imports server code",
+      "message": "Client-side code is importing server-side code.",
+      "suggestedFix": "Expose server functionality through an API route, server action, or shared interface."
+    },
+    {
+      "id": "client-no-prisma",
+      "from": "**/client/**",
+      "to": "[external] @prisma/client",
+      "severity": "high",
+      "title": "Client code accesses Prisma directly",
+      "message": "Client-side code is importing Prisma directly.",
+      "suggestedFix": "Move database access into a server-side module, API route, or server action."
+    }
+  ]
+}
+```
+
+---
+
+## Using configuration in CI
+
+You can combine custom configuration with `--fail-on`.
+
+Example:
+
+```bash
+revos scan . --report all --fail-on high
+```
+
+This fails the command if any issue with severity `high` or higher is found.
+
+Supported severity thresholds:
+
+```text
+low
+medium
+high
+```
+
+Examples:
+
+```bash
+revos scan . --fail-on high
+revos scan . --fail-on medium
+revos scan . --fail-on low
+```
+
+---
+
+## Recommended workflow
+
+For a new project:
+
+```bash
+revos init . --auto --force
+revos scan .
+```
+
+Then review:
+
+```text
+.revos/rules.json
+```
+
+Adjust as needed:
+
+```text
+remove noisy rules
+lower severity for rules your team wants as warnings
+add ignoreRules for rules that do not fit your architecture
+add ignoreIssues for intentional exceptions
+```
+
+Then use Revos in CI:
+
+```bash
+revos scan . --report all --fail-on high
+```
+
+---
+
+## Best practices
+
+Prefer a small number of high-confidence rules.
+
+Good rules are:
+
+```text
+specific
+easy to explain
+low-noise
+connected to a real architecture decision
+actionable
+```
+
+Avoid rules that are too broad unless your team explicitly wants strict enforcement.
+
+Good example:
+
+```json
+{
+  "from": "**/domain/**",
+  "to": "[external] fastapi"
+}
+```
+
+Riskier example:
+
+```json
+{
+  "from": "**/app/**",
+  "to": "[external] *"
+}
+```
+
+Architecture rules should help developers move faster with confidence, not create unnecessary friction.

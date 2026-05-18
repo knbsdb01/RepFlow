@@ -1,0 +1,2966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Repository Health Report - {{ Metadata.repository }}</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath fill='%237A4A22' d='M160 90C160 60 352 60 352 90L352 130L160 130Z'/%3E%3Crect fill='%235E3618' x='140' y='130' width='232' height='28' rx='14'/%3E%3Cellipse fill='%233B8C8E' cx='138' cy='220' rx='28' ry='42'/%3E%3Cellipse fill='%233B8C8E' cx='374' cy='220' rx='28' ry='42'/%3E%3Cpath fill='%234FA3A5' d='M128 180C128 130 384 130 384 180V360C384 410 128 410 128 360Z'/%3E%3Cellipse fill='%23FFFFFF' cx='220' cy='240' rx='34' ry='38'/%3E%3Cellipse fill='%23FFFFFF' cx='292' cy='240' rx='34' ry='38'/%3E%3Ccircle fill='%231B1B1B' cx='228' cy='252' r='10'/%3E%3Ccircle fill='%231B1B1B' cx='300' cy='252' r='10'/%3E%3Cellipse fill='%232A2A2A' cx='256' cy='286' rx='14' ry='10'/%3E%3Crect fill='%23F2F2F2' x='242' y='304' width='12' height='24' rx='3'/%3E%3Crect fill='%23F2F2F2' x='258' y='304' width='12' height='24' rx='3'/%3E%3Cg transform='translate(330 260)'%3E%3Ccircle fill='%23C9B36D' cx='0' cy='0' r='56'/%3E%3Ccircle fill='%23FFF6D5' cx='0' cy='0' r='42'/%3E%3Crect fill='%236A4020' x='40' y='40' width='90' height='14' rx='7' transform='rotate(35)'/%3E%3C/g%3E%3Cpath fill='%233B8C8E' d='M128 330C180 360 332 360 384 330V360C384 410 128 410 128 360Z' opacity='0.6'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9/dist/style.min.css">
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --border-color: #30363d;
+            --accent-green: #3fb950;
+            --accent-yellow: #d29922;
+            --accent-red: #f85149;
+            --accent-blue: #58a6ff;
+            --accent-purple: #a371f7;
+            --sidebar-width: 220px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        /* Sidebar Navigation */
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: var(--sidebar-width);
+            height: 100vh;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            padding: 1.5rem 0;
+            overflow-y: auto;
+            z-index: 100;
+        }
+
+        .sidebar-header {
+            padding: 0 1rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 1rem;
+        }
+
+        .sidebar-header h2 {
+            font-size: 1rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .sidebar-score {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-top: 0.25rem;
+        }
+
+        .sidebar-score.good { color: var(--accent-green); }
+        .sidebar-score.warning { color: var(--accent-yellow); }
+        .sidebar-score.danger { color: var(--accent-red); }
+
+        .nav-section {
+            padding: 0.5rem 0;
+        }
+
+        .nav-section-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            padding: 0.5rem 1rem;
+            margin-top: 0.5rem;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.85rem;
+            transition: all 0.15s;
+        }
+
+        .nav-item:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .nav-item.active {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border-left: 2px solid var(--accent-blue);
+        }
+
+        .nav-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .nav-dot.good { background: var(--accent-green); }
+        .nav-dot.warning { background: var(--accent-yellow); }
+        .nav-dot.danger { background: var(--accent-red); }
+        .nav-dot.neutral { background: var(--text-secondary); }
+
+        /* Main Content */
+        .main-content {
+            padding: 2rem 3rem 2rem calc(var(--sidebar-width) + 3rem);
+            max-width: calc(1400px + var(--sidebar-width));
+            margin: 0 auto;
+        }
+
+        /* Hero Section */
+        .hero {
+            display: grid;
+            grid-template-columns: 200px 280px 1fr;
+            gap: 2rem;
+            align-items: center;
+            margin-bottom: 3rem;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .hero-score {
+            text-align: center;
+        }
+
+        .score-circle {
+            width: 160px;
+            height: 160px;
+            border-radius: 50%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            margin: 0 auto;
+        }
+
+        .score-circle.good {
+            background: conic-gradient(var(--accent-green) 0deg, var(--accent-green) calc(var(--score) * 3.6deg), var(--bg-tertiary) calc(var(--score) * 3.6deg));
+        }
+        .score-circle.warning {
+            background: conic-gradient(var(--accent-yellow) 0deg, var(--accent-yellow) calc(var(--score) * 3.6deg), var(--bg-tertiary) calc(var(--score) * 3.6deg));
+        }
+        .score-circle.danger {
+            background: conic-gradient(var(--accent-red) 0deg, var(--accent-red) calc(var(--score) * 3.6deg), var(--bg-tertiary) calc(var(--score) * 3.6deg));
+        }
+
+        .score-circle::before {
+            content: '';
+            position: absolute;
+            width: 130px;
+            height: 130px;
+            background: var(--bg-primary);
+            border-radius: 50%;
+        }
+
+        .score-value { position: relative; font-size: 2.5rem; font-weight: bold; z-index: 1; }
+        .score-label { position: relative; color: var(--text-secondary); font-size: 0.8rem; z-index: 1; }
+
+        .hero-trend-stat {
+            margin-top: 0.75rem;
+            text-align: center;
+        }
+        .hero-trend-value {
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: var(--text-secondary);
+        }
+        .hero-trend-value.down { color: var(--accent-red); }
+        .hero-trend-value.up { color: var(--accent-green); }
+        .hero-trend-rate {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.15rem;
+        }
+
+        .hero-radar {
+            height: 200px;
+        }
+
+        .hero-metrics {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+
+        .metric-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .metric-card-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+
+        .metric-card-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
+
+        .metric-card-value.good { color: var(--accent-green); }
+        .metric-card-value.warning { color: var(--accent-yellow); }
+        .metric-card-value.danger { color: var(--accent-red); }
+
+        /* Section Styles */
+        .section {
+            margin: 2.5rem 0;
+            scroll-margin-top: 1rem;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .section-header h2 {
+            font-size: 1.4rem;
+            font-weight: 600;
+        }
+
+        .section-subtitle {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .card h3 {
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+
+        .card.highlight-red { border-left: 4px solid var(--accent-red); }
+        .card.highlight-yellow { border-left: 4px solid var(--accent-yellow); }
+        .card.highlight-green { border-left: 4px solid var(--accent-green); }
+        .card.highlight-blue { border-left: 4px solid var(--accent-blue); }
+
+        /* Recommendations List */
+        .recommendations-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .recommendation-category {
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .recommendation-item {
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .recommendation-item:last-child { border-bottom: none; }
+
+        .recommendation-item strong {
+            display: block;
+            margin-bottom: 0.25rem;
+        }
+
+        .recommendation-item > div {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        .recommendation-item > div p {
+            margin: 0.25rem 0;
+        }
+
+        .recommendation-item > div p:first-child {
+            margin-top: 0;
+        }
+
+        /* Stats Grid */
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .stat-box {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-box .value {
+            font-size: 1.75rem;
+            font-weight: bold;
+        }
+
+        .stat-box .label {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+        }
+
+        /* Tables */
+        .table-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        /* Simple-DataTables dark theme overrides */
+        .datatable-wrapper {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .datatable-top, .datatable-bottom {
+            padding: 0.75rem 1rem;
+            background: var(--bg-secondary);
+        }
+
+        .datatable-search input {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            padding: 0.5rem 0.75rem;
+        }
+
+        .datatable-search input::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .datatable-search input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .datatable-selector {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            padding: 0.25rem 0.5rem;
+        }
+
+        .datatable-info {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .datatable-pagination-list {
+            display: flex;
+            gap: 0.25rem;
+        }
+
+        .datatable-pagination-list-item-link {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-primary);
+            padding: 0.25rem 0.5rem;
+            text-decoration: none;
+        }
+
+        .datatable-pagination-list-item-link:hover {
+            background: var(--bg-primary);
+        }
+
+        .datatable-pagination-list-item.datatable-active .datatable-pagination-list-item-link {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        .datatable-pagination-list-item.datatable-disabled .datatable-pagination-list-item-link {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Simple-DataTables header sorting */
+        .datatable-table th {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .datatable-table th:hover {
+            color: var(--text-primary);
+        }
+
+        .datatable-sorter {
+            color: var(--text-secondary);
+        }
+
+        .datatable-sorter::before,
+        .datatable-sorter::after {
+            border-color: var(--text-secondary) transparent;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background: var(--bg-tertiary);
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        tr:hover td {
+            background: var(--bg-tertiary);
+        }
+
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .badge.critical { background: #f8514933; color: var(--accent-red); }
+        .badge.high { background: #d2992233; color: var(--accent-yellow); }
+        .badge.medium { background: #58a6ff33; color: var(--accent-blue); }
+        .badge.low { background: #3fb95033; color: var(--accent-green); }
+
+        .files-badge {
+            display: inline-block;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            background: var(--bg-tertiary);
+            color: var(--accent-blue);
+            cursor: help;
+            border: 1px solid var(--border-color);
+        }
+
+        .files-badge:hover {
+            background: var(--bg-secondary);
+            border-color: var(--accent-blue);
+        }
+
+        /* Tooltips */
+        .tooltip {
+            cursor: help;
+            border-bottom: 1px dotted var(--text-secondary);
+        }
+
+        /* Tippy.js dark theme */
+        .tippy-box {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            font-size: 0.8rem;
+            font-weight: 400;
+            line-height: 1.4;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .tippy-box[data-placement^='top'] > .tippy-arrow::before {
+            border-top-color: var(--border-color);
+        }
+
+        .tippy-box[data-placement^='bottom'] > .tippy-arrow::before {
+            border-bottom-color: var(--border-color);
+        }
+
+        .tippy-content {
+            padding: 0.5rem 0.75rem;
+            white-space: pre-wrap;
+            max-width: 500px;
+            word-break: break-all;
+        }
+
+        /* Narrative / Markdown Content */
+        .narrative {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+
+        .narrative p {
+            margin: 0 0 1em 0;
+        }
+
+        .narrative p:last-child {
+            margin-bottom: 0;
+        }
+
+        .narrative h1, .narrative h2, .narrative h3, .narrative h4 {
+            color: var(--text-primary);
+            margin: 1.5em 0 0.75em 0;
+            font-weight: 600;
+        }
+
+        .narrative h1:first-child, .narrative h2:first-child, .narrative h3:first-child {
+            margin-top: 0;
+        }
+
+        .narrative h1 { font-size: 1.4rem; }
+        .narrative h2 { font-size: 1.2rem; }
+        .narrative h3 { font-size: 1.05rem; }
+        .narrative h4 { font-size: 0.95rem; }
+
+        .narrative ul, .narrative ol {
+            margin: 0.75em 0;
+            padding-left: 1.5em;
+        }
+
+        .narrative li {
+            margin: 0.35em 0;
+        }
+
+        .narrative li::marker {
+            color: var(--accent-blue);
+        }
+
+        .narrative strong {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .narrative em {
+            font-style: italic;
+        }
+
+        .narrative code {
+            background: var(--bg-tertiary);
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+            font-size: 0.9em;
+            font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+            color: var(--accent-blue);
+        }
+
+        .narrative pre {
+            background: var(--bg-tertiary);
+            padding: 1em;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 1em 0;
+        }
+
+        .narrative pre code {
+            background: none;
+            padding: 0;
+            font-size: 0.85em;
+            color: var(--text-primary);
+        }
+
+        .narrative blockquote {
+            border-left: 3px solid var(--accent-blue);
+            margin: 1em 0;
+            padding: 0.5em 0 0.5em 1em;
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+            border-radius: 0 4px 4px 0;
+        }
+
+        .narrative blockquote p {
+            margin: 0;
+        }
+
+        .narrative a {
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+
+        .narrative a:hover {
+            text-decoration: underline;
+        }
+
+        .narrative hr {
+            border: none;
+            border-top: 1px solid var(--border-color);
+            margin: 1.5em 0;
+        }
+
+        .narrative table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1em 0;
+            font-size: 0.9em;
+        }
+
+        .narrative th, .narrative td {
+            padding: 0.5em 0.75em;
+            text-align: left;
+            border: 1px solid var(--border-color);
+        }
+
+        .narrative th {
+            background: var(--bg-tertiary);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Charts */
+        .chart-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+
+        .chart-container h3 {
+            margin-bottom: 1rem;
+            font-size: 1rem;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 350px;
+        }
+
+        /* Grid layouts */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+        }
+
+        /* Collapsible */
+        .collapsible {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+
+        .collapsible-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .collapsible-header:hover {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+        }
+
+        .collapsible-header h3 {
+            margin: 0;
+            font-size: 1rem;
+        }
+
+        .collapsible-toggle {
+            color: var(--text-secondary);
+            font-size: 1.2rem;
+            transition: transform 0.2s;
+        }
+
+        .collapsible.open .collapsible-toggle {
+            transform: rotate(180deg);
+        }
+
+        .collapsible-content {
+            display: none;
+            padding: 0 1.5rem 1.5rem;
+        }
+
+        .collapsible.open .collapsible-content {
+            display: block;
+        }
+
+        /* Key Findings */
+        .key-finding {
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+
+        .key-finding:last-child {
+            border-bottom: none;
+        }
+
+        /* Progress bars */
+        .progress-bar {
+            height: 6px;
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 3px;
+        }
+
+        .progress-fill.good { background: var(--accent-green); }
+        .progress-fill.warning { background: var(--accent-yellow); }
+        .progress-fill.danger { background: var(--accent-red); }
+
+        /* Component score cards */
+        .component-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .component-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .component-card-name {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .component-card-score {
+            font-size: 1.25rem;
+            font-weight: bold;
+        }
+
+        .component-card-weight {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+
+        /* Report Header */
+        .report-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding-bottom: 1.5rem;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .report-title {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .report-title h1 {
+            font-size: 1.75rem;
+            font-weight: 600;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .report-title h1 code {
+            font-weight: 500;
+            color: var(--accent-blue);
+            background: var(--bg-tertiary);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 1.5rem;
+        }
+
+        .report-meta {
+            display: flex;
+            gap: 1.5rem;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .report-meta-item {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+
+        .report-branding a {
+            color: var(--text-primary);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .report-branding a:hover {
+            color: var(--accent-blue);
+        }
+
+        .branding-text {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            line-height: 1.2;
+            text-align: right;
+        }
+
+        .branding-name {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .branding-version {
+            color: var(--text-muted);
+            font-size: 0.65rem;
+            opacity: 0.7;
+        }
+
+        .omen-logo {
+            width: 32px;
+            height: 32px;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 2rem;
+            border-top: 1px solid var(--border-color);
+            margin-top: 3rem;
+            color: var(--text-secondary);
+        }
+
+        footer a {
+            color: var(--accent-blue);
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .hero {
+                grid-template-columns: 180px 1fr;
+            }
+            .hero-radar {
+                display: none;
+            }
+        }
+
+        @media (max-width: 900px) {
+            .sidebar {
+                display: none;
+            }
+            .main-content {
+                padding: 1.5rem;
+                max-width: 100%;
+            }
+            .hero {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+            .hero-metrics {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .recommendations-grid {
+                grid-template-columns: 1fr;
+            }
+            .grid-2, .grid-3 {
+                grid-template-columns: 1fr;
+            }
+        }
+        .cell-overflow { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .event-commits { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+    <!-- Sidebar Navigation -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <h2>Health Score</h2>
+            <div class="sidebar-score {{ ScoreClass }}">{{ Score.score }}</div>
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Overview</div>
+            <a href="#quick-insights" class="nav-item">
+                <span class="nav-dot {% if Score.score < 60 %}danger{% elif Score.score < 80 %}warning{% else %}good{% endif %}"></span>
+                Quick Insights
+            </a>
+            <a href="#summary" class="nav-item">
+                <span class="nav-dot neutral"></span>
+                Executive Summary
+            </a>
+            <a href="#recommendations" class="nav-item">
+                <span class="nav-dot {% if Summary and Summary.recommendations and Summary.recommendations.high_priority %}danger{% else %}good{% endif %}"></span>
+                Recommendations
+            </a>
+            <a href="#findings" class="nav-item">
+                <span class="nav-dot neutral"></span>
+                Key Findings
+            </a>
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Risk Areas</div>
+            {% if Hotspots and Hotspots.files %}
+            <a href="#hotspots" class="nav-item">
+                <span class="nav-dot {% if Hotspots.files | length > 20 %}danger{% elif Hotspots.files | length > 10 %}warning{% else %}good{% endif %}"></span>
+                Hotspots
+            </a>
+            {% endif %}
+            {% if Flags and Flags.flags %}
+            <a href="#flags" class="nav-item">
+                <span class="nav-dot warning"></span>
+                Feature Flags
+            </a>
+            {% endif %}
+            {% if Cohesion %}
+            <a href="#cohesion" class="nav-item">
+                <span class="nav-dot {% if Score.components.cohesion is defined and Score.components.cohesion < 70 %}danger{% elif Score.components.cohesion is defined and Score.components.cohesion < 80 %}warning{% else %}good{% endif %}"></span>
+                Low Cohesion
+            </a>
+            {% endif %}
+            {% if Smells and Smells.smells %}
+            <a href="#smells" class="nav-item">
+                <span class="nav-dot {% if Smells.summary.critical_count > 0 %}danger{% elif Smells.summary.total_smells > 5 %}warning{% else %}good{% endif %}"></span>
+                Arch Smells
+            </a>
+            {% endif %}
+            {% if Graph and Graph.summary.total_edges > 0 %}
+            <a href="#dependencies" class="nav-item">
+                <span class="nav-dot {% if Graph.summary.cycle_count > 3 %}danger{% elif Graph.summary.cycle_count > 0 %}warning{% else %}good{% endif %}"></span>
+                Dependencies
+            </a>
+            {% endif %}
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Technical Debt</div>
+            {% if SATD and SATD.items %}
+            <a href="#satd" class="nav-item">
+                <span class="nav-dot {% if count_severity(SATD.items, "critical") > 5 %}danger{% elif count_severity(SATD.items, "critical") > 0 %}warning{% else %}good{% endif %}"></span>
+                Known Issues
+            </a>
+            {% endif %}
+            {% if Duplicates %}
+            <a href="#duplicates" class="nav-item">
+                <span class="nav-dot {% if Duplicates.duplication_ratio > 15.0 %}danger{% elif Duplicates.duplication_ratio > 10.0 %}warning{% else %}good{% endif %}"></span>
+                Duplication
+            </a>
+            {% endif %}
+            {% if Tdg %}
+            <a href="#tdg" class="nav-item">
+                <span class="nav-dot {% if Tdg.average_score < 50.0 %}danger{% elif Tdg.average_score < 70.0 %}warning{% else %}good{% endif %}"></span>
+                Debt Gradient
+            </a>
+            {% endif %}
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Analysis</div>
+            {% if Trend %}
+            <a href="#trends" class="nav-item">
+                <span class="nav-dot {% if Trend.slope < -0.5 %}danger{% elif Trend.slope < 0.0 %}warning{% else %}good{% endif %}"></span>
+                Trends
+            </a>
+            {% endif %}
+            {% if Churn %}
+            <a href="#churn" class="nav-item">
+                <span class="nav-dot neutral"></span>
+                Change Activity
+            </a>
+            {% endif %}
+            {% if Ownership %}
+            <a href="#ownership" class="nav-item">
+                <span class="nav-dot {% if Ownership.bus_factor < 3 %}danger{% elif Ownership.bus_factor < 5 %}warning{% else %}good{% endif %}"></span>
+                Ownership
+            </a>
+            {% endif %}
+            {% if Temporal and Temporal.couplings %}
+            <a href="#temporal" class="nav-item">
+                <span class="nav-dot {% if Temporal.summary.strong_couplings > 10 %}danger{% elif Temporal.summary.strong_couplings > 3 %}warning{% else %}good{% endif %}"></span>
+                Temporal Coupling
+            </a>
+            {% endif %}
+        </div>
+
+        <div class="nav-section">
+            <div class="nav-section-title">Reference</div>
+            <a href="#breakdown" class="nav-item">
+                <span class="nav-dot neutral"></span>
+                Score Breakdown
+            </a>
+            <a href="#glossary" class="nav-item">
+                <span class="nav-dot neutral"></span>
+                Glossary
+            </a>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Report Header -->
+        <header class="report-header">
+            <div class="report-title">
+                <h1>Health Report: <code>{{ Metadata.repository }}</code></h1>
+                <div class="report-meta">
+                    <span class="report-meta-item">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z"></path></svg>
+                        <span class="human-date" data-iso="{{ Metadata.generated_at }}">{{ Metadata.generated_at }}</span>
+                    </span>
+                    {% if Metadata.since %}
+                    <span class="report-meta-item">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M5.75 0a.75.75 0 0 1 .75.75V2h3V.75a.75.75 0 0 1 1.5 0V2h1.25c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 12.25 16H3.75A1.75 1.75 0 0 1 2 14.25V3.75C2 2.784 2.784 2 3.75 2H5V.75A.75.75 0 0 1 5.75 0Zm-2 5.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-8.5a.25.25 0 0 0-.25-.25Z"></path></svg>
+                        {{ Metadata.since }} history
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="report-branding">
+                <a href="https://github.com/panbanda/omen" target="_blank">
+                    <span class="branding-text">
+                        <span class="branding-name">omen</span>
+                        <span class="branding-version">{{ Metadata.omen_version }}</span>
+                    </span>
+                </a>
+            </div>
+        </header>
+
+        <!-- Hero Section -->
+        <section class="hero">
+            <div class="hero-score">
+                <div class="score-circle {{ ScoreClass }}" style="--score: {{ Score.score }}">
+                    <span class="score-value">{{ Score.score }}</span>
+                    <span class="score-label">Health Score</span>
+                </div>
+                {% if Trend %}
+                <div class="hero-trend-stat">
+                    <div class="hero-trend-value {% if Trend.slope < 0.0 %}down{% elif Trend.slope > 0.0 %}up{% endif %}">
+                        {% if Trend.slope < 0.0 %}Declining{% elif Trend.slope > 0.0 %}Improving{% else %}Stable{% endif %}
+                    </div>
+                    <div class="hero-trend-rate">{{ Trend.slope | round(2) }} pts/mo</div>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="hero-radar">
+                <div id="radarChart" style="width:100%;height:200px"></div>
+            </div>
+
+            <div class="hero-metrics">
+                <div class="metric-card">
+                    <div class="metric-card-value">{{ Score.files_analyzed }}</div>
+                    <div class="metric-card-label">Files Analyzed</div>
+                </div>
+                {% if Hotspots and Hotspots.files %}
+                <div class="metric-card">
+                    <div class="metric-card-value {% if Hotspots.files | length > 20 %}danger{% elif Hotspots.files | length > 10 %}warning{% else %}good{% endif %}">{{ Hotspots.files | length }}</div>
+                    <div class="metric-card-label">Hotspot Files</div>
+                </div>
+                {% endif %}
+                {% if SATD and SATD.items %}
+                <div class="metric-card">
+                    <div class="metric-card-value {% if count_severity(SATD.items, "critical") > 5 %}danger{% elif count_severity(SATD.items, "critical") > 0 %}warning{% else %}good{% endif %}">{{ count_severity(SATD.items, "critical") }}</div>
+                    <div class="metric-card-label">Critical Issues</div>
+                </div>
+                {% endif %}
+                {% if Duplicates %}
+                <div class="metric-card">
+                    <div class="metric-card-value {% if Duplicates.duplication_ratio > 15.0 %}danger{% elif Duplicates.duplication_ratio > 10.0 %}warning{% else %}good{% endif %}">{{ Duplicates.duplication_ratio | round(1) }}%</div>
+                    <div class="metric-card-label">Duplication</div>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- Quick Insights (Data-driven, always shown) -->
+        <section id="quick-insights" class="section">
+            <div class="section-header">
+                <h2>Quick Insights</h2>
+            </div>
+            <p class="section-subtitle">Key findings from the analysis - prioritized by impact</p>
+
+            <div class="grid-2">
+                {% if SATD and SATD.items %}
+                {% set critical_count = count_severity(SATD.items, "critical") %}
+                {% set high_count = count_severity(SATD.items, "high") %}
+                {% if critical_count > 0 or high_count > 10 %}
+                <div class="card highlight-red">
+                    <h3>Technical Debt Hotspot</h3>
+                    <p style="color: var(--text-secondary);">
+                        Found <strong>{{ critical_count }} critical</strong> and <strong>{{ high_count }} high-priority</strong> debt items.
+                        These are areas where the team has explicitly noted problems. Consider scheduling time to address the most impactful items.
+                    </p>
+                </div>
+                {% endif %}
+                {% endif %}
+
+                {% if Cohesion and Cohesion.classes %}
+                {% set god_classes = Cohesion.classes | selectattr("lcom", "gt", 50) | list %}
+                {% if god_classes | length > 5 %}
+                <div class="card highlight-yellow">
+                    <h3>Low Cohesion Classes</h3>
+                    <p style="color: var(--text-secondary);">
+                        Detected <strong>{{ god_classes | length }} classes</strong> with low cohesion (LCOM > 50).
+                        These classes may be doing too many unrelated things. Consider splitting them into more focused components.
+                    </p>
+                </div>
+                {% endif %}
+                {% endif %}
+
+                {% if Duplicates and Duplicates.duplication_ratio > 5.0 %}
+                <div class="card highlight-yellow">
+                    <h3>Code Duplication</h3>
+                    <p style="color: var(--text-secondary);">
+                        <strong>{{ Duplicates.duplication_ratio | round(1) }}%</strong> of code is duplicated across {{ Duplicates.clone_groups }} clone groups.
+                        Bugs fixed in one location may need fixing in others. Consider extracting shared functionality.
+                    </p>
+                </div>
+                {% endif %}
+
+                {% if Churn and Churn.summary.total_commits > 100 %}
+                <div class="card highlight-blue">
+                    <h3>Active Development</h3>
+                    <p style="color: var(--text-secondary);">
+                        <strong>{{ Churn.summary.total_commits }}</strong> commits across <strong>{{ Churn.summary.unique_files }}</strong> files.
+                        {% if Churn.summary.hotspot_files %}The most active files are potential hotspots that warrant attention.{% endif %}
+                    </p>
+                </div>
+                {% endif %}
+
+                {% if Score.score >= 80 %}
+                <div class="card highlight-green">
+                    <h3>Healthy Codebase</h3>
+                    <p style="color: var(--text-secondary);">
+                        Overall health score of <strong>{{ Score.score }}</strong> indicates a well-maintained codebase.
+                        Continue current practices and address issues as they arise.
+                    </p>
+                </div>
+                {% elif Score.score < 60 %}
+                <div class="card highlight-red">
+                    <h3>Attention Needed</h3>
+                    <p style="color: var(--text-secondary);">
+                        Health score of <strong>{{ Score.score }}</strong> suggests significant technical debt.
+                        Consider allocating dedicated time for refactoring and debt reduction.
+                    </p>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- Executive Summary -->
+        {% if Summary %}
+        {% if Summary.executive_summary %}
+        <section id="summary" class="section">
+            <div class="section-header">
+                <h2>Executive Summary</h2>
+            </div>
+            <div class="card">
+                <div class="narrative">{{ Summary.executive_summary | markdown }}</div>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Recommendations -->
+        {% if Summary.recommendations %}
+        {% if Summary.recommendations.high_priority or Summary.recommendations.medium_priority or Summary.recommendations.ongoing %}
+        <section id="recommendations" class="section">
+            <div class="section-header">
+                <h2>Recommendations</h2>
+            </div>
+            <p class="section-subtitle">Prioritized actions to improve code health</p>
+
+            <div class="recommendations-list">
+                {% if Summary.recommendations.high_priority %}
+                <div class="card highlight-red">
+                    <div class="recommendation-category" style="color: var(--accent-red);">
+                        <span class="nav-dot danger"></span>
+                        Critical - Address Soon
+                    </div>
+                    {% for item in Summary.recommendations.high_priority %}
+                    <div class="recommendation-item">
+                        <strong>{{ item.title }}</strong>
+                        <div>{{ item.description | markdown }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                {% if Summary.recommendations.medium_priority %}
+                <div class="card highlight-yellow">
+                    <div class="recommendation-category" style="color: var(--accent-yellow);">
+                        <span class="nav-dot warning"></span>
+                        Important - Plan For
+                    </div>
+                    {% for item in Summary.recommendations.medium_priority %}
+                    <div class="recommendation-item">
+                        <strong>{{ item.title }}</strong>
+                        <div>{{ item.description | markdown }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                {% if Summary.recommendations.ongoing %}
+                <div class="card highlight-blue">
+                    <div class="recommendation-category" style="color: var(--accent-blue);">
+                        <span class="nav-dot neutral"></span>
+                        Maintenance - Keep Doing
+                    </div>
+                    {% for item in Summary.recommendations.ongoing %}
+                    <div class="recommendation-item">
+                        <strong>{{ item.title }}</strong>
+                        <div>{{ item.description | markdown }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+        </section>
+        {% endif %}
+        {% endif %}
+
+        <!-- Key Findings -->
+        {% if Summary.key_findings %}
+        <section id="findings" class="section">
+            <div class="section-header">
+                <h2>Key Findings</h2>
+            </div>
+            <div class="card">
+                {% for item in Summary.key_findings %}
+                <div class="key-finding narrative">{{ item | markdown }}</div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+        {% endif %}
+
+        <!-- Hotspots -->
+        {% if Hotspots and Hotspots.files %}
+        <section id="hotspots" class="section">
+            <div class="section-header">
+                <h2>Hotspots</h2>
+            </div>
+            <p class="section-subtitle">Files with both high complexity and frequent changes - highest risk for bugs</p>
+
+            {% if HotspotsInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ HotspotsInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ Hotspots.files | length }}</div>
+                    <div class="label">Hotspot Files</div>
+                </div>
+                {% if Hotspots.summary %}
+                <div class="stat-box">
+                    <div class="value">{{ Hotspots.summary.max_score | round(2) }}</div>
+                    <div class="label">Highest Risk</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Hotspots.summary.avg_score | round(2) }}</div>
+                    <div class="label">Average Risk</div>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="chart-container">
+                <h3>Risk Landscape</h3>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.75rem;">Files in the upper-right are both complex and frequently changed -- the most likely sources of bugs. Bubble size reflects overall risk score. Green is low risk, yellow moderate, red high.</p>
+                <div id="hotspotsScatter" style="width:100%;height:400px"></div>
+            </div>
+
+            <div class="table-container">
+                <table id="hotspots-table">
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Lang</th>
+                            <th><span class="tooltip" data-tooltip="Combined score of churn frequency and code complexity. Higher risk = more likely to have bugs.">Risk</span></th>
+                            <th><span class="tooltip" data-tooltip="Number of times this file was modified in the analysis period.">Changes</span></th>
+                            <th><span class="tooltip" data-tooltip="Cyclomatic complexity - number of independent paths through the code.">Complexity</span></th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if HotspotsTableJson %}<script>window.__td_hotspots={{ HotspotsTableJson }};</script>{% endif %}
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Feature Flags -->
+        {% if Flags and Flags.flags %}
+        <section id="flags" class="section">
+            <div class="section-header">
+                <h2>Feature Flags</h2>
+            </div>
+            <p class="section-subtitle">Stale feature flags that should be cleaned up</p>
+
+            {% if FlagsInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ FlagsInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+            <div class="table-container">
+                <table id="flags-table">
+                    <thead>
+                        <tr>
+                            <th>Flag</th>
+                            <th><span class="tooltip" data-tooltip="Cleanup priority based on age and staleness. Critical flags are old and unchanged - likely safe to remove.">Priority</span></th>
+                            <th><span class="tooltip" data-tooltip="Time since the flag was first introduced to the codebase.">Age</span></th>
+                            <th><span class="tooltip" data-tooltip="Number of files containing references to this flag. Higher spread = more cleanup effort.">Files</span></th>
+                            <th>Provider</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in Flags.flags %}
+                        {% set flag_file_count = item.complexity.file_spread or item.file_spread or (item.references | length) %}
+                        <tr>
+                            <td><code>{{ item.flag_key }}</code></td>
+                            <td><span class="badge {{ (item.priority.level or (item.stale and "HIGH" or "LOW")) | priority_badge }}">{{ item.priority.level or (item.stale and "High" or "Low") }}</span></td>
+                            <td><span class="time-ago" data-timestamp="{{ item.staleness.introduced_at or item.first_seen }}"></span></td>
+                            <td><span class="files-badge tooltip" data-tooltip="{{ flag_files_tooltip(item.references, Metadata.paths) }}">{{ flag_file_count }} file{% if flag_file_count != 1 %}s{% endif %}</span></td>
+                            <td>{{ item.provider }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Low Cohesion Classes -->
+        {% if Cohesion and Cohesion.classes %}
+        <section id="cohesion" class="section">
+            <div class="section-header">
+                <h2>Low Cohesion Classes</h2>
+            </div>
+            <p class="section-subtitle">Classes doing too many unrelated things - candidates for splitting</p>
+
+            {% if ComponentsInsight and ComponentsInsight.component_insights and ComponentsInsight.component_insights.cohesion %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ ComponentsInsight.component_insights.cohesion | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="table-container">
+                <table id="cohesion-table">
+                    <thead>
+                        <tr>
+                            <th>Class</th>
+                            <th>File</th>
+                            <th>Language</th>
+                            <th><span class="tooltip" data-tooltip="Lack of Cohesion of Methods. Higher values indicate a class is doing too many unrelated things and should be split.">LCOM</span></th>
+                            <th><span class="tooltip" data-tooltip="Weighted Methods per Class. Sum of complexity of all methods. High values indicate overly complex classes.">WMC</span></th>
+                            <th><span class="tooltip" data-tooltip="Coupling Between Objects. Number of classes this class depends on. High coupling makes changes risky.">CBO</span></th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if CohesionTableJson %}<script>window.__td_cohesion={{ CohesionTableJson }};</script>{% endif %}
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Architectural Smells -->
+        {% if Smells and Smells.smells %}
+        <section id="smells" class="section">
+            <div class="section-header">
+                <h2>Architectural Smells</h2>
+            </div>
+            <p class="section-subtitle">Structural problems that make the codebase harder to change safely</p>
+
+            {% if SmellsInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ SmellsInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value" style="color: {% if Smells.summary.total_smells > 10 %}var(--accent-red){% elif Smells.summary.total_smells > 3 %}var(--accent-yellow){% else %}var(--accent-green){% endif %}">{{ Smells.summary.total_smells }}</div>
+                    <div class="label">Total Smells</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-red)">{{ Smells.summary.cyclic_count }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Files or modules that depend on each other in a cycle. Cycles make it impossible to change one without affecting all.">Cyclic Dependencies</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-yellow)">{{ Smells.summary.hub_count }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Files with excessive incoming and outgoing dependencies. Changes here ripple everywhere.">Hub Dependencies</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-yellow)">{{ Smells.summary.unstable_count }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Stable modules depending on unstable ones. The stable module is forced to change when the unstable one does.">Unstable Dependencies</span></div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table id="smells-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th><span class="tooltip" data-tooltip="Impact severity. Critical smells cause cascading problems; medium smells are localized.">Severity</span></th>
+                            <th>Files Involved</th>
+                            <th>Suggestion</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in Smells.smells %}
+                        <tr>
+                            <td style="white-space: nowrap;"><span class="tooltip" data-tooltip="{{ item.description }}">{{ item.smell_type | smell_type_label }}</span></td>
+                            <td><span class="badge {{ item.severity | lower }}">{{ item.severity }}</span></td>
+                            <td>
+                                {% for comp in item.components %}
+                                <code style="font-size: 0.75rem;">{{ comp | rel_path(Metadata.paths) | truncate_path(40) }}</code>{% if not loop.last %}, {% endif %}
+                                {% endfor %}
+                            </td>
+                            <td style="color: var(--text-secondary); font-size: 0.85rem;">{{ item.suggestion | truncate(120) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Dependency Graph -->
+        {% if Graph and Graph.summary.total_edges > 0 %}
+        <section id="dependencies" class="section">
+            <div class="section-header">
+                <h2>Dependency Structure</h2>
+            </div>
+            <p class="section-subtitle">Import graph analysis - cycles, bottlenecks, and instability</p>
+
+            {% if GraphInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ GraphInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ Graph.summary.total_nodes }}</div>
+                    <div class="label">Modules</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Graph.summary.total_edges }}</div>
+                    <div class="label">Dependencies</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Graph.summary.avg_degree | round(1) }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Average number of imports + importers per file. Higher means more interconnected.">Avg Degree</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: {% if Graph.summary.cycle_count > 3 %}var(--accent-red){% elif Graph.summary.cycle_count > 0 %}var(--accent-yellow){% else %}var(--accent-green){% endif %}">{{ Graph.summary.cycle_count }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Strongly connected components with more than one node. Each cycle is a group of files that all depend on each other.">Dependency Cycles</span></div>
+                </div>
+            </div>
+
+            {% if Graph.cycles %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <h3 style="margin-bottom: 0.75rem;">Detected Cycles</h3>
+                {% for cycle in Graph.cycles %}
+                <div style="margin-bottom: 0.75rem; padding: 0.5rem 0.75rem; background: var(--bg-tertiary); border-radius: 6px; border-left: 3px solid var(--accent-red);">
+                    <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Cycle ({{ cycle | length }} files)</div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                        {% for file in cycle %}
+                        <code style="font-size: 0.75rem;">{{ file | rel_path(Metadata.paths) | truncate_path(50) }}</code>{% if not loop.last %}<span style="color: var(--accent-red); margin: 0 0.125rem;">&#8594;</span>{% endif %}
+                        {% endfor %}
+                        <span style="color: var(--accent-red); margin: 0 0.125rem;">&#8594;</span>
+                        <code style="font-size: 0.75rem; opacity: 0.6;">{{ cycle[0] | rel_path(Metadata.paths) | truncate_path(50) }}</code>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if Graph.nodes %}
+            <div class="table-container">
+                <table id="graph-table">
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Lang</th>
+                            <th><span class="tooltip" data-tooltip="Relative importance in the dependency graph. Higher PageRank = more other files depend on this (directly or transitively).">PageRank</span></th>
+                            <th><span class="tooltip" data-tooltip="How often this file sits on the shortest path between other files. High betweenness = bottleneck.">Betweenness</span></th>
+                            <th><span class="tooltip" data-tooltip="Number of files that import this file.">In</span></th>
+                            <th><span class="tooltip" data-tooltip="Number of files this file imports.">Out</span></th>
+                            <th><span class="tooltip" data-tooltip="Ratio of outgoing to total dependencies. 0 = maximally stable (many dependents), 1 = maximally unstable. Stable modules depending on unstable ones is a smell.">Instability</span></th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if GraphTableJson %}<script>window.__td_graph={{ GraphTableJson }};</script>{% endif %}
+            </div>
+            {% endif %}
+        </section>
+        {% endif %}
+
+        <!-- SATD / Known Issues -->
+        {% if SATD and SATD.items %}
+        <section id="satd" class="section">
+            <div class="section-header">
+                <h2>Known Issues</h2>
+            </div>
+            <p class="section-subtitle">Problems the team has documented but not yet fixed (TODO, FIXME, HACK)</p>
+
+            {% if SATDInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ SATDInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ SATD.items | length }}</div>
+                    <div class="label">Total Issues</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-red)">{{ count_severity(SATD.items, "critical") }}</div>
+                    <div class="label">Critical</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-yellow)">{{ count_severity(SATD.items, "high") }}</div>
+                    <div class="label">High</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-blue)">{{ count_severity(SATD.items, "medium") }}</div>
+                    <div class="label">Medium</div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="chart-container">
+                    <h3>By Severity</h3>
+                    <div class="chart-wrapper" style="height: 220px;">
+                        <div id="satdSeverityChart" style="width:100%;height:220px"></div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <h3>By Category</h3>
+                    <div class="chart-wrapper" style="height: 220px;">
+                        <div id="satdCategoryChart" style="width:100%;height:220px"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table id="satd-table">
+                    <thead>
+                        <tr>
+                            <th><span class="tooltip" data-tooltip="Impact level based on marker type. FIXME/XXX are critical, TODO is high, HACK/TEMP are medium.">Severity</span></th>
+                            <th><span class="tooltip" data-tooltip="Type of technical debt: defect (bugs), design (architecture), requirement (missing features), etc.">Category</span></th>
+                            <th>File</th>
+                            <th>Lang</th>
+                            <th>Line</th>
+                            <th>Comment</th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if SATDTableJson %}<script>window.__td_satd={{ SATDTableJson }};</script>{% endif %}
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Duplicates -->
+        {% if Duplicates %}
+        <section id="duplicates" class="section">
+            <div class="section-header">
+                <h2>Duplicated Code</h2>
+            </div>
+            <p class="section-subtitle">Code that appears in multiple places - bugs fixed in one spot may need fixing elsewhere</p>
+
+            {% if DuplicationInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ DuplicationInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value" style="color: {% if Duplicates.duplication_ratio > 15.0 %}var(--accent-red){% elif Duplicates.duplication_ratio > 10.0 %}var(--accent-yellow){% else %}var(--accent-green){% endif %}">{{ Duplicates.duplication_ratio | round(1) }}%</div>
+                    <div class="label">Duplication Rate</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Duplicates.clone_groups }}</div>
+                    <div class="label">Clone Groups</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Duplicates.duplicate_lines }}</div>
+                    <div class="label">Duplicate Lines</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Duplicates.total_lines }}</div>
+                    <div class="label">Total Lines</div>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <h3>Duplication Level</h3>
+                <div id="duplicationGauge" style="width:100%;height:250px"></div>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Technical Debt Gradient -->
+        {% if Tdg %}
+        <section id="tdg" class="section">
+            <div class="section-header">
+                <h2>Technical Debt Gradient</h2>
+            </div>
+            <p class="section-subtitle">Per-file debt scores - prioritize cleanup where it matters most</p>
+
+            {% if TdgInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ TdgInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ Tdg.total_files }}</div>
+                    <div class="label">Files Scored</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value {{ Tdg.average_score | round(0) | int | score_class }}">{{ Tdg.average_score | round(1) }}</div>
+                    <div class="label">Average Score</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value {{ Tdg.average_grade | grade_class }}">{{ Tdg.average_grade }}</div>
+                    <div class="label">Average Grade</div>
+                </div>
+                {% if Tdg.grade_distribution %}
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-red)">{{ Tdg.grade_distribution.F | default(0) }}</div>
+                    <div class="label">Failing Files</div>
+                </div>
+                {% endif %}
+            </div>
+
+            {% if Tdg.grade_distribution %}
+            <div class="chart-container" style="margin-bottom: 1.5rem;">
+                <h3>Grade Distribution</h3>
+                <div class="chart-wrapper" style="height: 220px;">
+                    <div id="tdgGradeChart" style="width:100%;height:220px"></div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if Tdg.files %}
+            <div class="table-container">
+                <table id="tdg-table">
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Lang</th>
+                            <th><span class="tooltip" data-tooltip="Overall debt score (0-100). Higher is better. Below 60 is failing.">Score</span></th>
+                            <th>Grade</th>
+                            <th><span class="tooltip" data-tooltip="Cyclomatic complexity contribution (0-20).">Structural</span></th>
+                            <th><span class="tooltip" data-tooltip="Nesting depth contribution (0-15).">Semantic</span></th>
+                            <th><span class="tooltip" data-tooltip="Code duplication ratio contribution (0-15).">Duplication</span></th>
+                            <th><span class="tooltip" data-tooltip="Import count contribution (0-15).">Coupling</span></th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if TdgTableJson %}<script>window.__td_tdg={{ TdgTableJson }};</script>{% endif %}
+            </div>
+            {% endif %}
+        </section>
+        {% endif %}
+
+        <!-- Trends -->
+        {% if Trend %}
+        <section id="trends" class="section">
+            <div class="section-header">
+                <h2>Historical Trends</h2>
+            </div>
+            <p class="section-subtitle">How code quality has changed over time</p>
+
+            {% if TrendsInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ TrendsInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ Trend.start_score }}</div>
+                    <div class="label">Starting Score</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Trend.end_score }}</div>
+                    <div class="label">Current Score</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: {% if Trend.slope < 0.0 %}var(--accent-yellow){% else %}var(--accent-green){% endif %}">{{ Trend.slope | round(2) }}</div>
+                    <div class="label">Monthly Change</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Trend.r_squared | round(2) }}</div>
+                    <div class="label">Trend Fit (R2)</div>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <h3>Health Score Over Time</h3>
+                <div class="chart-wrapper">
+                    <div id="trendsChart" style="width:100%;height:350px"></div>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <h3>Component Trends</h3>
+                <div class="chart-wrapper">
+                    <div id="componentTrendsChart" style="width:100%;height:350px"></div>
+                </div>
+            </div>
+
+            {% if TrendsInsight and TrendsInsight.historical_events %}
+            <div class="card">
+                <h3>Notable Events</h3>
+                <table id="notable-events-table">
+                    <thead>
+                        <tr>
+                            <th>Period</th>
+                            <th>Change</th>
+                            <th>Driver</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in TrendsInsight.historical_events %}
+                        <tr style="background: {% if item.change < 0 %}#f8514915{% else %}#3fb95015{% endif %};" data-period="{{ item.period }}" data-driver="{{ item.primary_driver }}">
+                            <td><strong>{{ item.period }}</strong></td>
+                            <td><span class="badge {% if item.change < -5 %}critical{% elif item.change < 0 %}high{% else %}low{% endif %}">{% if item.change > 0 %}+{% endif %}{{ item.change }} pts</span></td>
+                            <td>{{ item.primary_driver }}</td>
+                            <td class="event-description" style="color: var(--text-secondary); font-size: 0.85rem;"></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+        </section>
+        {% endif %}
+
+        <!-- Change Activity / Churn -->
+        {% if Churn %}
+        <section id="churn" class="section">
+            <div class="section-header">
+                <h2>Change Activity</h2>
+            </div>
+            <p class="section-subtitle">How frequently code is being modified</p>
+
+            {% if ChurnInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ ChurnInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ Churn.summary.total_commits }}</div>
+                    <div class="label">Total Changes</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Churn.summary.unique_files }}</div>
+                    <div class="label">Files Changed</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Churn.summary.total_added }}</div>
+                    <div class="label">Lines Added</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Churn.summary.total_deleted }}</div>
+                    <div class="label">Lines Deleted</div>
+                </div>
+            </div>
+
+            {% if Churn.files %}
+            <div class="table-container">
+                <table id="churn-table">
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Lang</th>
+                            <th><span class="tooltip" data-tooltip="Number of commits that modified this file in the analysis period.">Changes</span></th>
+                            <th><span class="tooltip" data-tooltip="Number of unique authors who modified this file.">Contributors</span></th>
+                            <th><span class="tooltip" data-tooltip="Normalized score combining commit frequency and lines changed. Higher = more volatile.">Churn Score</span></th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if ChurnTableJson %}<script>window.__td_churn={{ ChurnTableJson }};</script>{% endif %}
+            </div>
+            {% endif %}
+        </section>
+        {% endif %}
+
+        <!-- Ownership -->
+        {% if Ownership %}
+        <section id="ownership" class="section">
+            <div class="section-header">
+                <h2>Code Ownership</h2>
+            </div>
+            <p class="section-subtitle">How knowledge is distributed - concentrated knowledge is a risk</p>
+
+            {% if OwnershipInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ OwnershipInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value" style="color: {% if Ownership.bus_factor < 3 %}var(--accent-red){% elif Ownership.bus_factor < 5 %}var(--accent-yellow){% else %}var(--accent-green){% endif %}">{{ Ownership.bus_factor }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Minimum people who would need to leave before critical knowledge is lost. Higher is better; 1 is a serious risk.">Bus Factor</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-yellow)">{{ Ownership.knowledge_silos }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Files where one person has written most of the code. If they leave, knowledge is lost.">Knowledge Silos</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Ownership.total_files }}</div>
+                    <div class="label">Total Files</div>
+                </div>
+                {% if Ownership.total_files > 0 %}
+                <div class="stat-box">
+                    <div class="value" style="color: var(--accent-yellow)">{{ percent(Ownership.knowledge_silos, Ownership.total_files) | round(1) }}%</div>
+                    <div class="label">Files at Risk</div>
+                </div>
+                {% endif %}
+            </div>
+
+            {% if Ownership.top_owners %}
+            <div class="chart-container">
+                <h3>Top Contributors</h3>
+                <div class="chart-wrapper" style="height: 280px;">
+                    <div id="ownershipChart" style="width:100%;height:280px"></div>
+                </div>
+            </div>
+            {% endif %}
+        </section>
+        {% endif %}
+
+        <!-- Temporal Coupling -->
+        {% if Temporal and Temporal.couplings %}
+        <section id="temporal" class="section">
+            <div class="section-header">
+                <h2>Temporal Coupling</h2>
+            </div>
+            <p class="section-subtitle">Files that frequently change together - reveals hidden dependencies not in the import graph</p>
+
+            {% if TemporalInsight %}
+            <div class="card" style="margin-bottom: 1.5rem;">
+                <div class="narrative">{{ TemporalInsight.section_insight | markdown }}</div>
+            </div>
+            {% endif %}
+
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="value">{{ Temporal.summary.total_couplings }}</div>
+                    <div class="label">Coupled Pairs</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" style="color: {% if Temporal.summary.strong_couplings > 10 %}var(--accent-red){% elif Temporal.summary.strong_couplings > 3 %}var(--accent-yellow){% else %}var(--accent-green){% endif %}">{{ Temporal.summary.strong_couplings }}</div>
+                    <div class="label"><span class="tooltip" data-tooltip="Pairs with coupling strength >= 0.5. These files almost always change together.">Strong Couplings</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Temporal.summary.avg_coupling_strength | round(2) }}</div>
+                    <div class="label">Avg Strength</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ Temporal.summary.max_coupling_strength | round(2) }}</div>
+                    <div class="label">Max Strength</div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table id="temporal-table">
+                    <thead>
+                        <tr>
+                            <th>File A</th>
+                            <th>File B</th>
+                            <th><span class="tooltip" data-tooltip="Number of commits where both files changed together.">Co-changes</span></th>
+                            <th><span class="tooltip" data-tooltip="Ratio of co-changes to the maximum commits of either file. 1.0 = always change together.">Strength</span></th>
+                        </tr>
+                    </thead>
+                </table>
+                {% if TemporalTableJson %}<script>window.__td_temporal={{ TemporalTableJson }};</script>{% endif %}
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Score Breakdown -->
+        <section id="breakdown" class="section">
+            <div class="section-header">
+                <h2>Score Breakdown</h2>
+            </div>
+            <p class="section-subtitle">How the health score is calculated from individual components</p>
+
+            <div class="grid-3">
+                {% if Score.components.complexity is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Complexity</span>
+                        <span class="component-card-weight">25%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.complexity | score_class }}">{{ Score.components.complexity }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.complexity | score_class }}" style="width: {{ Score.components.complexity }}%"></div></div>
+                </div>
+                {% endif %}
+
+                {% if Score.components.duplication is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Duplication</span>
+                        <span class="component-card-weight">20%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.duplication | score_class }}">{{ Score.components.duplication }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.duplication | score_class }}" style="width: {{ Score.components.duplication }}%"></div></div>
+                </div>
+                {% endif %}
+
+                {% if Score.components.cohesion is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Cohesion</span>
+                        <span class="component-card-weight">15%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.cohesion | score_class }}">{{ Score.components.cohesion }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.cohesion | score_class }}" style="width: {{ Score.components.cohesion }}%"></div></div>
+                </div>
+                {% endif %}
+
+                {% if Score.components.tdg is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Debt Gradient</span>
+                        <span class="component-card-weight">15%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.tdg | score_class }}">{{ Score.components.tdg }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.tdg | score_class }}" style="width: {{ Score.components.tdg }}%"></div></div>
+                </div>
+                {% endif %}
+
+                {% if Score.components.satd is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Known Debt</span>
+                        <span class="component-card-weight">10%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.satd | score_class }}">{{ Score.components.satd }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.satd | score_class }}" style="width: {{ Score.components.satd }}%"></div></div>
+                </div>
+                {% endif %}
+
+                {% if Score.components.coupling is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Coupling</span>
+                        <span class="component-card-weight">10%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.coupling | score_class }}">{{ Score.components.coupling }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.coupling | score_class }}" style="width: {{ Score.components.coupling }}%"></div></div>
+                </div>
+                {% endif %}
+
+                {% if Score.components.smells is defined %}
+                <div class="component-card">
+                    <div class="component-card-header">
+                        <span class="component-card-name">Code Smells</span>
+                        <span class="component-card-weight">5%</span>
+                    </div>
+                    <div class="component-card-score {{ Score.components.smells | score_class }}">{{ Score.components.smells }}</div>
+                    <div class="progress-bar"><div class="progress-fill {{ Score.components.smells | score_class }}" style="width: {{ Score.components.smells }}%"></div></div>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- Glossary -->
+        <section id="glossary" class="section">
+            <div class="collapsible" id="glossary-collapse">
+                <div class="collapsible-header" onclick="toggleCollapsible('glossary-collapse')">
+                    <h3>Glossary of Terms</h3>
+                    <span class="collapsible-toggle">&#9660;</span>
+                </div>
+                <div class="collapsible-content">
+                    <div class="grid-2">
+                        <div class="card">
+                            <h3>Health Score</h3>
+                            <p style="color: var(--text-secondary);">A weighted composite metric (0-100) measuring overall code quality. Above 80 is good, 60-80 needs attention, below 60 is concerning.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Hotspot</h3>
+                            <p style="color: var(--text-secondary);">A file that is both complex AND frequently changed. These are the highest-risk areas because they're hard to change safely but get changed often.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Bus Factor</h3>
+                            <p style="color: var(--text-secondary);">The minimum number of people who would need to leave before critical knowledge is lost. Higher is better; 1 is a serious risk.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Knowledge Silo</h3>
+                            <p style="color: var(--text-secondary);">A file that only one person has ever touched. If that person leaves, the knowledge goes with them.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Cyclomatic Complexity</h3>
+                            <p style="color: var(--text-secondary);">The number of independent paths through code. More paths means more test cases needed and more ways things can go wrong.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Cognitive Complexity</h3>
+                            <p style="color: var(--text-secondary);">How hard code is to understand. Accounts for nesting, breaks in flow, and things that make humans struggle to follow the logic.</p>
+                        </div>
+                        <div class="card">
+                            <h3>LCOM (Cohesion)</h3>
+                            <p style="color: var(--text-secondary);">How well a class's methods work together. High LCOM means methods don't share data - the class is probably doing too many unrelated things.</p>
+                        </div>
+                        <div class="card">
+                            <h3>CBO (Coupling)</h3>
+                            <p style="color: var(--text-secondary);">How many other classes a class depends on. High coupling means changes ripple through the codebase - everything is connected to everything.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Churn Rate</h3>
+                            <p style="color: var(--text-secondary);">How frequently a file changes. High churn indicates instability - the code may be unclear, have bugs, or be undergoing active development.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Self-Admitted Technical Debt (SATD)</h3>
+                            <p style="color: var(--text-secondary);">Code issues the team has documented (TODO, FIXME, HACK, XXX). These represent known shortcuts that need eventual attention.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Code Clone / Duplicate</h3>
+                            <p style="color: var(--text-secondary);">Similar code appearing in multiple places. When a bug is fixed in one spot, it may need fixing elsewhere. Candidates for refactoring into shared functions.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Technical Debt Gradient</h3>
+                            <p style="color: var(--text-secondary);">Per-file quality score (0-100) combining complexity, duplication, coupling, and other factors. Lower scores mean more accumulated debt.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Temporal Coupling</h3>
+                            <p style="color: var(--text-secondary);">Files that frequently change together in the same commits. High temporal coupling suggests hidden dependencies not visible in the import graph.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Architectural Smell</h3>
+                            <p style="color: var(--text-secondary);">A structural pattern that violates design principles: cyclic dependencies, hub-like modules, or stable code depending on unstable code.</p>
+                        </div>
+                        <div class="card">
+                            <h3>Instability</h3>
+                            <p style="color: var(--text-secondary);">Ratio of outgoing to total dependencies. 0 = maximally stable (many things depend on it), 1 = maximally unstable (depends on many things).</p>
+                        </div>
+                        <div class="card">
+                            <h3>PageRank</h3>
+                            <p style="color: var(--text-secondary);">Importance of a file in the dependency graph. Files with high PageRank are depended on by many other important files.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <p>Generated <span class="human-date" data-iso="{{ Metadata.generated_at }}">{{ Metadata.generated_at }}</span> using <a href="https://github.com/panbanda/omen">Omen</a></p>
+        </footer>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/simple-datatables@9"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@4/cdn.min.js"></script>
+    <script src="https://unpkg.com/@popperjs/core@2"></script>
+    <script src="https://unpkg.com/tippy.js@6"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        // Toggle collapsible sections
+        function toggleCollapsible(id) {
+            const el = document.getElementById(id);
+            el.classList.toggle('open');
+        }
+
+        // Highlight active nav item on scroll
+        const sections = document.querySelectorAll('.section[id]');
+        const navItems = document.querySelectorAll('.nav-item');
+
+        window.addEventListener('scroll', () => {
+            let current = '';
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop;
+                if (window.scrollY >= sectionTop - 100) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navItems.forEach(item => {
+                item.classList.remove('active');
+                if (item.getAttribute('href') === '#' + current) {
+                    item.classList.add('active');
+                }
+            });
+        });
+
+        // Format large numbers with commas
+        document.querySelectorAll('.stat-box .value, .metric-card-value').forEach(el => {
+            const text = el.textContent.trim();
+            if (/^\d+$/.test(text)) {
+                el.textContent = parseInt(text, 10).toLocaleString();
+            }
+        });
+
+        // Render time-ago for timestamps using date-fns
+        document.querySelectorAll('.time-ago').forEach(el => {
+            const timestamp = el.dataset.timestamp;
+            if (!timestamp) {
+                el.textContent = '-';
+                return;
+            }
+            const date = new Date(timestamp);
+            if (isNaN(date.getTime())) {
+                el.textContent = '-';
+                return;
+            }
+            el.textContent = dateFns.formatDistanceToNow(date, { addSuffix: false });
+            el.title = dateFns.format(date, 'MMM d, yyyy');
+        });
+
+        // Initialize Simple-DataTables on all data tables
+        const dataTableConfig = {
+            perPage: 15,
+            perPageSelect: [10, 15, 25, 50, 100],
+            searchable: true,
+            sortable: true,
+            labels: {
+                placeholder: "Search...",
+                perPage: "entries per page",
+                noRows: "No entries found",
+                info: "Showing {start} to {end} of {rows} entries"
+            }
+        };
+
+        const dataTableInstances = {};
+        const jsonTableMap = {
+            'hotspots-table': window.__td_hotspots,
+            'cohesion-table': window.__td_cohesion,
+            'graph-table': window.__td_graph,
+            'satd-table': window.__td_satd,
+            'tdg-table': window.__td_tdg,
+            'churn-table': window.__td_churn,
+            'temporal-table': window.__td_temporal
+        };
+        const tableIds = ['hotspots-table', 'flags-table', 'cohesion-table', 'satd-table', 'churn-table', 'smells-table', 'graph-table', 'tdg-table', 'temporal-table'];
+        tableIds.forEach(id => {
+            const table = document.getElementById(id);
+            if (!table) return;
+            const jsonData = jsonTableMap[id];
+            if (jsonData && jsonData.length) {
+                const headings = Array.from(table.querySelectorAll('thead th')).map(th => th.innerHTML);
+                dataTableInstances[id] = new simpleDatatables.DataTable(table, {
+                    ...dataTableConfig,
+                    data: { headings: headings, data: jsonData }
+                });
+            } else if (table.querySelector('tbody tr')) {
+                dataTableInstances[id] = new simpleDatatables.DataTable(table, dataTableConfig);
+            }
+        });
+
+        // Format ISO timestamps to human-friendly dates
+        document.querySelectorAll('.human-date').forEach(function(el) {
+            var iso = el.getAttribute('data-iso');
+            if (!iso) return;
+            try {
+                var d = new Date(iso);
+                el.textContent = d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                el.title = iso;
+            } catch (e) {}
+        });
+
+        // Initialize tooltips with Tippy.js (after DataTables to catch cloned elements)
+        tippy('.tooltip', {
+            content: (el) => el.getAttribute('data-tooltip'),
+            placement: 'bottom',
+            arrow: true,
+            maxWidth: 300,
+            appendTo: document.body
+        });
+    </script>
+
+    <!-- ECharts -->
+    <script>
+        // All chart instances for resize handling
+        const echartsInstances = [];
+        function initChart(el) {
+            if (!el) return null;
+            const chart = echarts.init(el, null, { renderer: 'canvas' });
+            echartsInstances.push(chart);
+            return chart;
+        }
+
+        // Shared palette matching CSS vars
+        const palette = {
+            blue: '#58a6ff', green: '#3fb950', yellow: '#d29922',
+            red: '#f85149', purple: '#a371f7', gray: '#8b949e',
+            bg: '#161b22', border: '#30363d', text: '#8b949e', textPrimary: '#e6edf3'
+        };
+
+        // --- 1. Radar Chart ---
+        (function() {
+            const el = document.getElementById('radarChart');
+            if (!el) return;
+            const chart = initChart(el);
+            chart.setOption({
+                radar: {
+                    indicator: [
+                        { name: 'Complexity', max: 100 },
+                        { name: 'Duplication', max: 100 },
+                        { name: 'Cohesion', max: 100 },
+                        { name: 'Coupling', max: 100 },
+                        { name: 'Debt', max: 100 },
+                        { name: 'Smells', max: 100 }
+                    ],
+                    axisName: { color: palette.text, fontSize: 10 },
+                    splitLine: { lineStyle: { color: palette.border } },
+                    splitArea: { show: false },
+                    axisLine: { lineStyle: { color: palette.border } }
+                },
+                tooltip: {},
+                series: [{
+                    type: 'radar',
+                    data: [{
+                        value: [
+                            {{ Score.components.complexity | default(0) }},
+                            {{ Score.components.duplication | default(0) }},
+                            {{ Score.components.cohesion | default(0) }},
+                            {{ Score.components.coupling | default(0) }},
+                            {{ Score.components.satd | default(0) }},
+                            {{ Score.components.smells | default(0) }}
+                        ],
+                        areaStyle: { color: 'rgba(88,166,255,0.2)' },
+                        lineStyle: { color: palette.blue, width: 2 },
+                        itemStyle: { color: palette.blue },
+                        emphasis: {
+                            areaStyle: { color: 'rgba(88,166,255,0.35)' }
+                        }
+                    }]
+                }]
+            });
+        })();
+
+        // --- 8. Hotspot Scatter ---
+        {% if Hotspots and Hotspots.files %}
+        (function() {
+            const el = document.getElementById('hotspotsScatter');
+            if (!el) return;
+            const chart = initChart(el);
+
+            const data = [
+                {% for item in Hotspots.files %}{
+                    name: '{{ item.path | rel_path(Metadata.paths) | truncate_path(60) }}',
+                    value: [{{ item.commits }}, {{ item.avg_cognitive | round(1) }}, {{ item.hotspot_score | round(3) }}]
+                }{% if not loop.last %},{% endif %}
+                {% endfor %}
+            ];
+
+            function severityColor(score) {
+                if (score >= 0.7) return palette.red;
+                if (score >= 0.4) return palette.yellow;
+                if (score >= 0.2) return palette.blue;
+                return palette.green;
+            }
+
+            chart.setOption({
+                tooltip: {
+                    formatter: function(p) {
+                        var d = p.data;
+                        return '<strong>' + d.name + '</strong><br/>'
+                            + 'Risk: ' + d.value[2] + '<br/>'
+                            + 'Commits: ' + d.value[0] + '<br/>'
+                            + 'Complexity: ' + d.value[1];
+                    }
+                },
+                grid: { left: 60, right: 30, top: 20, bottom: 50 },
+                xAxis: {
+                    name: 'Commits',
+                    nameLocation: 'middle',
+                    nameGap: 30,
+                    nameTextStyle: { color: palette.text },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    axisLabel: { color: palette.text },
+                    splitLine: { lineStyle: { color: palette.border, type: 'dashed' } }
+                },
+                yAxis: {
+                    name: 'Complexity',
+                    nameLocation: 'middle',
+                    nameGap: 40,
+                    nameTextStyle: { color: palette.text },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    axisLabel: { color: palette.text },
+                    splitLine: { lineStyle: { color: palette.border, type: 'dashed' } }
+                },
+                series: [{
+                    type: 'scatter',
+                    data: data,
+                    symbolSize: function(val) {
+                        return Math.max(8, val[2] * 40);
+                    },
+                    itemStyle: {
+                        color: function(p) { return severityColor(p.data.value[2]); },
+                        opacity: 0.8
+                    },
+                    emphasis: {
+                        itemStyle: { opacity: 1, borderColor: palette.textPrimary, borderWidth: 2 }
+                    }
+                }]
+            });
+        })();
+        {% endif %}
+
+        // --- 9. Duplication Gauge ---
+        {% if Duplicates %}
+        (function() {
+            var el = document.getElementById('duplicationGauge');
+            if (!el) return;
+            var chart = initChart(el);
+            chart.setOption({
+                series: [{
+                    type: 'gauge',
+                    startAngle: 200,
+                    endAngle: -20,
+                    min: 0,
+                    max: 100,
+                    axisLine: {
+                        lineStyle: {
+                            width: 20,
+                            color: [
+                                [0.10, palette.green],
+                                [0.20, palette.yellow],
+                                [1,    palette.red]
+                            ]
+                        }
+                    },
+                    axisTick: { show: false },
+                    splitLine: { show: false },
+                    axisLabel: { color: palette.text, fontSize: 11, distance: -30 },
+                    pointer: { width: 5, length: '60%', itemStyle: { color: palette.textPrimary } },
+                    detail: {
+                        valueAnimation: true,
+                        formatter: '{value}%',
+                        fontSize: 24,
+                        fontWeight: 'bold',
+                        color: palette.textPrimary,
+                        offsetCenter: [0, '60%']
+                    },
+                    title: { show: false },
+                    data: [{ value: {{ Duplicates.duplication_ratio | round(1) }} }]
+                }]
+            });
+        })();
+        {% endif %}
+
+        // Score Breakdown Bar chart removed (redundant with component cards below)
+    </script>
+
+    {% if Trend %}
+    <script>
+        var trendsDataRaw = {
+            labels: [{% for p in Trend.points %}'{{ p.date }}'{% if not loop.last %}, {% endif %}{% endfor %}],
+            scores: [{% for p in Trend.points %}{{ p.score }}{% if not loop.last %}, {% endif %}{% endfor %}]
+        };
+
+        function formatDateLabel(isoDate) {
+            var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            var parts = isoDate.substring(0, 10).split('-');
+            return months[parseInt(parts[1], 10) - 1] + ' ' + parts[0];
+        }
+
+        var trendsData = {
+            labels: trendsDataRaw.labels.map(formatDateLabel),
+            rawLabels: trendsDataRaw.labels,
+            scores: trendsDataRaw.scores
+        };
+
+        {% if TrendsInsight and TrendsInsight.score_annotations %}
+        var scoreAnnotations = {{ TrendsInsight.score_annotations | tojson }};
+        {% else %}
+        var scoreAnnotations = [];
+        {% endif %}
+
+        {% if ComponentsInsight and ComponentsInsight.component_annotations %}
+        var componentAnnotations = {{ ComponentsInsight.component_annotations | tojson }};
+        {% else %}
+        var componentAnnotations = {};
+        {% endif %}
+
+        // Build a period-to-commits lookup from trend data
+        var notableCommitsByPeriod = {};
+        var trendPointCommits = [
+            {% for p in Trend.points %}
+            {% if p.notable_commits %}{ date: '{{ p.date }}', commits: {{ p.notable_commits | tojson }} }{% if not loop.last %},{% endif %}
+            {% endif %}
+            {% endfor %}
+        ];
+        trendPointCommits.forEach(function(pt) {
+            var key = pt.date.substring(0, 7);
+            if (!notableCommitsByPeriod[key]) notableCommitsByPeriod[key] = [];
+            notableCommitsByPeriod[key] = notableCommitsByPeriod[key].concat(pt.commits);
+        });
+
+        // Convert "Oct 2016" → "2016-10" to match annotation date format
+        var monthNames = {Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
+        function periodToDate(period) {
+            var parts = period.split(' ');
+            if (parts.length === 2 && monthNames[parts[0]]) {
+                return parts[1] + '-' + monthNames[parts[0]];
+            }
+            return period;
+        }
+
+        // Populate Notable Events descriptions from component annotations, falling back to commit messages
+        document.querySelectorAll('#notable-events-table tbody tr[data-period]').forEach(function(row) {
+            var period = row.getAttribute('data-period');
+            var periodDate = periodToDate(period);
+            var driver = row.getAttribute('data-driver').toLowerCase();
+            var descCell = row.querySelector('.event-description');
+            if (!descCell) return;
+            var annotations = componentAnnotations[driver];
+            if (annotations) {
+                var match = annotations.find(function(a) { return a.date === periodDate; });
+                if (match) {
+                    descCell.innerHTML = marked.parse(match.description);
+                    return;
+                }
+            }
+            // Fallback: show notable commits for this period
+            var commits = notableCommitsByPeriod[period];
+            if (commits && commits.length > 0) {
+                descCell.classList.add('event-commits');
+                descCell.title = commits.join('\n');
+                descCell.textContent = commits.slice(0, 3).join('; ');
+            }
+        });
+
+        function findLabelIndex(rawLabels, datePrefix) {
+            return rawLabels.findIndex(function(label) { return label.startsWith(datePrefix); });
+        }
+
+        // Build annotation markLines for health score chart (icon-only, details on hover)
+        var healthMarkLines = [];
+        scoreAnnotations.forEach(function(ann) {
+            var idx = findLabelIndex(trendsData.rawLabels, ann.date);
+            if (idx !== -1) {
+                var color = ann.change < 0 ? '#f85149' : '#3fb950';
+                healthMarkLines.push({
+                    xAxis: trendsData.labels[idx],
+                    lineStyle: { color: color + '88', type: 'dashed', width: 2 },
+                    label: {
+                        formatter: ann.change < 0 ? '\u25BC' : '\u25B2',
+                        fontSize: 12,
+                        color: color,
+                        position: 'insideStartTop',
+                        distance: 4
+                    }
+                });
+            }
+        });
+
+        // --- 2. Trends Chart ---
+        (function() {
+            var el = document.getElementById('trendsChart');
+            if (!el) return;
+            var chart = initChart(el);
+
+            var trendLineData = trendsData.labels.map(function(_, i) {
+                return ({{ Trend.intercept }} + {{ Trend.slope }} * i).toFixed(1);
+            });
+
+            var yMin = Math.min.apply(null, trendsData.scores) - 5;
+            var yMax = Math.max.apply(null, trendsData.scores) + 5;
+
+            chart.setOption({
+                tooltip: {
+                    trigger: 'axis',
+                    extraCssText: 'max-width: 420px; white-space: normal; word-wrap: break-word;',
+                    formatter: function(params) {
+                        var idx = params[0].dataIndex;
+                        var rawDate = trendsData.rawLabels[idx];
+                        var datePrefix = rawDate.substring(0, 7);
+                        var lines = [params[0].axisValueLabel];
+                        params.forEach(function(p) {
+                            lines.push(p.marker + ' ' + p.seriesName + ': <strong>' + p.value + '</strong>');
+                        });
+                        var ann = scoreAnnotations.find(function(a) { return a.date === datePrefix; });
+                        if (ann) {
+                            lines.push('<br/><em>' + ann.label + '</em>: ' + ann.description);
+                        }
+                        return lines.join('<br/>');
+                    }
+                },
+                legend: {
+                    data: ['Health Score', 'Trend Line'],
+                    textStyle: { color: palette.text },
+                    top: 0
+                },
+                grid: { left: 50, right: 30, top: 40, bottom: 80 },
+                dataZoom: [
+                    { type: 'slider', start: 0, end: 100, bottom: 10, textStyle: { color: palette.text }, borderColor: palette.border, fillerColor: 'rgba(88,166,255,0.1)' },
+                    { type: 'inside' }
+                ],
+                xAxis: {
+                    type: 'category',
+                    data: trendsData.labels,
+                    axisLabel: { color: palette.text, rotate: 45 },
+                    axisLine: { lineStyle: { color: palette.border } }
+                },
+                yAxis: {
+                    type: 'value',
+                    min: yMin,
+                    max: yMax,
+                    name: 'Score',
+                    nameTextStyle: { color: palette.text },
+                    axisLabel: { color: palette.text },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    splitLine: { lineStyle: { color: palette.border, type: 'dashed' } }
+                },
+                series: [
+                    {
+                        name: 'Health Score',
+                        type: 'line',
+                        data: trendsData.scores,
+                        smooth: 0.3,
+                        symbol: 'circle',
+                        symbolSize: 6,
+                        lineStyle: { color: palette.blue, width: 2 },
+                        itemStyle: { color: palette.blue },
+                        areaStyle: { color: 'rgba(88,166,255,0.15)' },
+                        markLine: {
+                            silent: true,
+                            symbol: 'none',
+                            data: healthMarkLines
+                        }
+                    },
+                    {
+                        name: 'Trend Line',
+                        type: 'line',
+                        data: trendLineData,
+                        smooth: false,
+                        symbol: 'none',
+                        lineStyle: { color: '#d2992288', type: 'dashed', width: 2 },
+                        itemStyle: { color: '#d29922' }
+                    }
+                ]
+            });
+
+            // Store for connect
+            window._trendsChart = chart;
+        })();
+
+        // --- 3. Component Trends Chart ---
+        {% if Trend.component_trends %}
+        (function() {
+            var el = document.getElementById('componentTrendsChart');
+            if (!el) return;
+            var chart = initChart(el);
+
+            var componentLabelsRaw = [{% for p in Trend.points %}'{{ p.date }}'{% if not loop.last %}, {% endif %}{% endfor %}];
+            var componentLabels = componentLabelsRaw.map(formatDateLabel);
+
+            var componentColors = {
+                complexity: '#3fb950',
+                duplication: '#58a6ff',
+                coupling: '#d29922',
+                cohesion: '#a371f7',
+                smells: '#f85149'
+            };
+
+            // Build component annotation markLines (icon-only, details on hover)
+            var componentMarkLines = [];
+            Object.keys(componentAnnotations).forEach(function(compName) {
+                var events = componentAnnotations[compName];
+                var color = componentColors[compName] || palette.gray;
+                events.forEach(function(ann) {
+                    var idx = findLabelIndex(componentLabelsRaw, ann.date);
+                    if (idx !== -1) {
+                        componentMarkLines.push({
+                            xAxis: componentLabels[idx],
+                            lineStyle: { color: color + '88', type: 'dashed', width: 2 },
+                            label: {
+                                formatter: '\u25C6',
+                                fontSize: 10,
+                                color: color,
+                                position: 'insideStartTop',
+                                distance: 4
+                            }
+                        });
+                    }
+                });
+            });
+
+            chart.setOption({
+                tooltip: {
+                    trigger: 'axis',
+                    extraCssText: 'max-width: 420px; white-space: normal; word-wrap: break-word;',
+                    formatter: function(params) {
+                        var idx = params[0].dataIndex;
+                        var rawDate = componentLabelsRaw[idx];
+                        var datePrefix = rawDate.substring(0, 7);
+                        var lines = [params[0].axisValueLabel];
+                        params.forEach(function(p) {
+                            lines.push(p.marker + ' ' + p.seriesName + ': <strong>' + p.value + '</strong>');
+                        });
+                        Object.keys(componentAnnotations).forEach(function(compName) {
+                            var events = componentAnnotations[compName];
+                            var ev = events.find(function(e) { return e.date === datePrefix; });
+                            if (ev) {
+                                lines.push('<br/><em>' + compName.toUpperCase() + '</em>: ' + ev.label + ' - ' + ev.description);
+                            }
+                        });
+                        return lines.join('<br/>');
+                    }
+                },
+                legend: {
+                    data: ['Complexity', 'Duplication', 'Coupling', 'Cohesion', 'Smells'],
+                    textStyle: { color: palette.text },
+                    top: 0
+                },
+                grid: { left: 50, right: 30, top: 40, bottom: 80 },
+                dataZoom: [
+                    { type: 'slider', start: 0, end: 100, bottom: 10, textStyle: { color: palette.text }, borderColor: palette.border, fillerColor: 'rgba(88,166,255,0.1)' },
+                    { type: 'inside' }
+                ],
+                xAxis: {
+                    type: 'category',
+                    data: componentLabels,
+                    axisLabel: { color: palette.text, rotate: 45 },
+                    axisLine: { lineStyle: { color: palette.border } }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Score',
+                    nameTextStyle: { color: palette.text },
+                    axisLabel: { color: palette.text },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    splitLine: { lineStyle: { color: palette.border, type: 'dashed' } }
+                },
+                series: [
+                    {
+                        name: 'Complexity', type: 'line', smooth: 0.3, symbol: 'circle', symbolSize: 4,
+                        data: [{% for p in Trend.points %}{{ p.components.complexity | default(0) }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                        lineStyle: { color: '#3fb950' }, itemStyle: { color: '#3fb950' },
+                        markLine: { silent: true, symbol: 'none', data: componentMarkLines }
+                    },
+                    {
+                        name: 'Duplication', type: 'line', smooth: 0.3, symbol: 'circle', symbolSize: 4,
+                        data: [{% for p in Trend.points %}{{ p.components.duplication | default(0) }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                        lineStyle: { color: '#58a6ff' }, itemStyle: { color: '#58a6ff' }
+                    },
+                    {
+                        name: 'Coupling', type: 'line', smooth: 0.3, symbol: 'circle', symbolSize: 4,
+                        data: [{% for p in Trend.points %}{{ p.components.coupling | default(0) }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                        lineStyle: { color: '#d29922' }, itemStyle: { color: '#d29922' }
+                    },
+                    {
+                        name: 'Cohesion', type: 'line', smooth: 0.3, symbol: 'circle', symbolSize: 4,
+                        data: [{% for p in Trend.points %}{{ p.components.cohesion | default(0) }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                        lineStyle: { color: '#a371f7' }, itemStyle: { color: '#a371f7' }
+                    },
+                    {
+                        name: 'Smells', type: 'line', smooth: 0.3, symbol: 'circle', symbolSize: 4,
+                        data: [{% for p in Trend.points %}{{ p.components.smells | default(0) }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                        lineStyle: { color: '#f85149' }, itemStyle: { color: '#f85149' }
+                    }
+                ]
+            });
+
+            // Connect trend charts so tooltip and dataZoom sync
+            if (window._trendsChart) {
+                echarts.connect([window._trendsChart, chart]);
+            }
+        })();
+        {% endif %}
+    </script>
+    {% endif %}
+
+    {% if Ownership and Ownership.top_owners %}
+    <script>
+        // --- 4. Ownership Chart ---
+        (function() {
+            var el = document.getElementById('ownershipChart');
+            if (!el) return;
+            var chart = initChart(el);
+
+            var names = [{% for o in Ownership.top_owners %}'{{ o.name }}'{% if not loop.last %}, {% endif %}{% endfor %}];
+            var values = [{% for o in Ownership.top_owners %}{{ o.files_owned }}{% if not loop.last %}, {% endif %}{% endfor %}];
+            var barColors = [palette.blue, palette.green, palette.yellow, palette.purple, palette.red, palette.gray, palette.blue, palette.green, palette.yellow, palette.purple];
+
+            chart.setOption({
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'shadow' }
+                },
+                grid: { left: 120, right: 40, top: 10, bottom: 10 },
+                xAxis: {
+                    type: 'value',
+                    axisLabel: { color: palette.text },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    splitLine: { lineStyle: { color: palette.border, type: 'dashed' } }
+                },
+                yAxis: {
+                    type: 'category',
+                    data: names,
+                    inverse: true,
+                    axisLabel: { color: palette.text, fontSize: 11 },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    axisTick: { show: false }
+                },
+                series: [{
+                    type: 'bar',
+                    data: values.map(function(v, i) {
+                        return {
+                            value: v,
+                            itemStyle: {
+                                color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+                                    { offset: 0, color: barColors[i % barColors.length] + '88' },
+                                    { offset: 1, color: barColors[i % barColors.length] }
+                                ]),
+                                borderRadius: [0, 4, 4, 0]
+                            }
+                        };
+                    }),
+                    label: {
+                        show: true,
+                        position: 'insideRight',
+                        color: palette.textPrimary,
+                        fontSize: 11,
+                        fontWeight: 'bold'
+                    },
+                    barMaxWidth: 24
+                }]
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if Tdg and Tdg.grade_distribution %}
+    <script>
+        // --- 5. TDG Grade Chart ---
+        (function() {
+            var el = document.getElementById('tdgGradeChart');
+            if (!el) return;
+            var chart = initChart(el);
+
+            var gradeOrder = ['A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D', 'F'];
+            var gradeColors = {
+                'A+': '#3fb950', 'A': '#3fb950', 'A-': '#56d364',
+                'B+': '#58a6ff', 'B': '#58a6ff', 'B-': '#79c0ff',
+                'C+': '#d29922', 'C': '#d29922', 'C-': '#e3b341',
+                'D': '#f85149', 'F': '#da3633'
+            };
+            var tdgDist = {{ Tdg.grade_distribution | tojson }};
+            var presentGrades = gradeOrder.filter(function(g) { return (tdgDist[g] || 0) > 0; });
+
+            chart.setOption({
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'shadow' }
+                },
+                grid: { left: 50, right: 20, top: 10, bottom: 30 },
+                xAxis: {
+                    type: 'category',
+                    data: presentGrades,
+                    axisLabel: { color: palette.text, fontWeight: 'bold' },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    axisTick: { show: false }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Files',
+                    nameTextStyle: { color: palette.text },
+                    axisLabel: { color: palette.text },
+                    axisLine: { lineStyle: { color: palette.border } },
+                    splitLine: { lineStyle: { color: palette.border, type: 'dashed' } }
+                },
+                series: [{
+                    type: 'bar',
+                    data: presentGrades.map(function(g) {
+                        return {
+                            value: tdgDist[g] || 0,
+                            itemStyle: {
+                                color: gradeColors[g] || palette.gray,
+                                borderRadius: [4, 4, 0, 0]
+                            }
+                        };
+                    }),
+                    label: {
+                        show: true,
+                        position: 'top',
+                        color: palette.textPrimary,
+                        fontSize: 11,
+                        fontWeight: 'bold'
+                    },
+                    barMaxWidth: 40
+                }]
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if SATD and SATD.items %}
+    <script>
+        // --- 6 & 7. SATD Charts ---
+        (function() {
+            var satdItems = {{ SATDStats | tojson }};
+            var donutRadius = ['40%', '70%'];
+
+            // 6. Severity doughnut
+            var sevEl = document.getElementById('satdSeverityChart');
+            if (sevEl) {
+                var chart = initChart(sevEl);
+                var sevTotal = satdItems.critical + satdItems.high + satdItems.medium + satdItems.low;
+                chart.setOption({
+                    tooltip: {
+                        trigger: 'item',
+                        formatter: '{b}: {c} ({d}%)'
+                    },
+                    legend: {
+                        orient: 'vertical',
+                        right: 10,
+                        top: 'center',
+                        textStyle: { color: palette.text }
+                    },
+                    series: [{
+                        type: 'pie',
+                        radius: donutRadius,
+                        center: ['40%', '50%'],
+                        label: { show: false },
+                        emphasis: {
+                            label: { show: true, fontSize: 14, fontWeight: 'bold', color: palette.textPrimary }
+                        },
+                        data: [
+                            { value: satdItems.critical, name: 'Critical', itemStyle: { color: palette.red } },
+                            { value: satdItems.high, name: 'High', itemStyle: { color: palette.yellow } },
+                            { value: satdItems.medium, name: 'Medium', itemStyle: { color: palette.blue } },
+                            { value: satdItems.low, name: 'Low', itemStyle: { color: palette.green } }
+                        ].filter(function(d) { return d.value > 0; })
+                    }],
+                    graphic: [{
+                        type: 'text',
+                        left: '37%',
+                        top: '45%',
+                        style: {
+                            text: sevTotal.toString(),
+                            fontSize: 22,
+                            fontWeight: 'bold',
+                            fill: palette.textPrimary,
+                            textAlign: 'center'
+                        }
+                    }, {
+                        type: 'text',
+                        left: '37%',
+                        top: '55%',
+                        style: {
+                            text: 'total',
+                            fontSize: 11,
+                            fill: palette.text,
+                            textAlign: 'center'
+                        }
+                    }]
+                });
+            }
+
+            // 7. Category doughnut
+            var catEl = document.getElementById('satdCategoryChart');
+            if (catEl) {
+                var chart2 = initChart(catEl);
+                var catKeys = Object.keys(satdItems.categories);
+                var catColors = [palette.blue, palette.green, palette.purple, palette.yellow, palette.red, palette.gray];
+                var catTotal = catKeys.reduce(function(s, k) { return s + satdItems.categories[k]; }, 0);
+                chart2.setOption({
+                    tooltip: {
+                        trigger: 'item',
+                        formatter: '{b}: {c} ({d}%)'
+                    },
+                    legend: {
+                        orient: 'vertical',
+                        right: 10,
+                        top: 'center',
+                        textStyle: { color: palette.text }
+                    },
+                    series: [{
+                        type: 'pie',
+                        radius: donutRadius,
+                        center: ['40%', '50%'],
+                        label: { show: false },
+                        emphasis: {
+                            label: { show: true, fontSize: 14, fontWeight: 'bold', color: palette.textPrimary }
+                        },
+                        data: catKeys.map(function(k, i) {
+                            return { value: satdItems.categories[k], name: k, itemStyle: { color: catColors[i % catColors.length] } };
+                        }).filter(function(d) { return d.value > 0; })
+                    }],
+                    graphic: [{
+                        type: 'text',
+                        left: '37%',
+                        top: '45%',
+                        style: {
+                            text: catTotal.toString(),
+                            fontSize: 22,
+                            fontWeight: 'bold',
+                            fill: palette.textPrimary,
+                            textAlign: 'center'
+                        }
+                    }, {
+                        type: 'text',
+                        left: '37%',
+                        top: '55%',
+                        style: {
+                            text: 'total',
+                            fontSize: 11,
+                            fill: palette.text,
+                            textAlign: 'center'
+                        }
+                    }]
+                });
+            }
+        })();
+    </script>
+    {% endif %}
+
+    <!-- Resize handler for all ECharts instances -->
+    <script>
+        window.addEventListener('resize', function() {
+            echartsInstances.forEach(function(c) { c.resize(); });
+        });
+    </script>
+</body>
+</html>

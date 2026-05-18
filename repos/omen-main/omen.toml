@@ -1,0 +1,63 @@
+# Omen Configuration (Rust CLI)
+# Documentation: https://github.com/panbanda/omen
+
+# Exclude patterns (glob)
+exclude_patterns = [
+    # Test and benchmark files
+    "*_test.rs",
+    "tests/**",
+    "benches/**",
+
+    # Build/output directories
+    "target/**",
+    ".git/**",
+    ".omen/**",
+    "dist/**",
+    "build/**",
+    "bin/**",
+
+    # Lock files
+    "Cargo.lock",
+
+    # Documentation
+    "**/README.md",
+    "**/CHANGELOG.md",
+]
+
+[complexity]
+cyclomatic_warn = 10
+cyclomatic_error = 20
+cognitive_warn = 15
+cognitive_error = 30
+max_nesting = 4
+
+[satd]
+categories = ["design", "defect", "requirement", "test", "performance", "security"]
+custom_markers = []
+
+[churn]
+since = "6m"
+top = 20
+
+[duplicates]
+min_tokens = 50
+min_similarity = 0.9
+
+[hotspot]
+top = 20
+
+[score]
+fail_under = 70.0
+
+[score.thresholds]
+complexity = 85.0
+duplication = 65.0
+satd = 80.0
+tdg = 90.0
+coupling = 70.0
+smells = 90.0
+cohesion = 80.0
+
+[feature_flags]
+stale_days = 90
+custom_providers = []

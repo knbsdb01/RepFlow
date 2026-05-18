@@ -1,0 +1,58 @@
+{
+  "name": "@revoscli/cli",
+  "version": "0.1.3",
+  "description": "Architecture governance for AI-assisted software development",
+  "type": "commonjs",
+  "bin": {
+    "revos": "dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format cjs --platform node --target node20 --out-dir dist --clean && node -e \"const fs=require('fs'); const p='dist/index.js'; const c=fs.readFileSync(p,'utf8'); fs.writeFileSync(p, '#!/usr/bin/env node\\n' + c);\" && chmod +x dist/index.js",
+    "prepack": "pnpm build"
+  },
+  "keywords": [
+    "architecture",
+    "static-analysis",
+    "ai-coding",
+    "typescript",
+    "nextjs",
+    "nestjs",
+    "laravel",
+    "php",
+    "python",
+    "fastapi",
+    "django",
+    "clean-architecture",
+    "cli",
+    "developer-tools"
+  ],
+  "author": "Matteo Cristello",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mattykry/revos.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/mattykry/revos#readme",
+  "bugs": {
+    "url": "https://github.com/mattykry/revos/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "fast-glob": "^3.3.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

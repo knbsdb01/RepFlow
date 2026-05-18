@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(git -C \"d:\\\\python_work_home\\\\ReqFlow\" log --oneline -5)",
+      "Bash(npm --version)",
+      "Bash(cargo --version)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:lib.rs)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:mcpserver.space)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:socket.dev)",
+      "WebFetch(domain:mcprepository.com)",
+      "Bash(gh repo *)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/braedonsaunders/codeflow/main/README.md\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/bharath03-a/GitCortex/main/README.md\")",
+      "Bash(curl -sIL \"https://raw.githubusercontent.com/braedonsaunders/codeflow/main/README.md\")"
+    ]
+  }
+}
