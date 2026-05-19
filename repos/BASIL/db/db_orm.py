@@ -13,9 +13,10 @@ class DbInterface():
 
     DB_TYPE = "postgresql"
     DB_USER = "basil-admin"
+    DB_HOST = os.environ.get("PGHOST", "localhost")
     DB_PORT = os.environ.get("BASIL_DB_PORT", 5432)
     DB_PASSWORD = os.environ.get("BASIL_DB_PASSWORD", "")
-    DB_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@localhost:{DB_PORT}"
+    DB_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}"
 
     def __init__(self, db_name="basil"):
         try:
