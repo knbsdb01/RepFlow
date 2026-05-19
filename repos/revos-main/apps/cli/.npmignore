@@ -1,7 +1,0 @@
-src
-*.ts
-tsconfig.json
-node_modules
-.revos
-reports
-*.log

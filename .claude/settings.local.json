@@ -16,7 +16,11 @@
       "Bash(gh repo *)",
       "Bash(curl -sL \"https://raw.githubusercontent.com/braedonsaunders/codeflow/main/README.md\")",
       "Bash(curl -sL \"https://raw.githubusercontent.com/bharath03-a/GitCortex/main/README.md\")",
-      "Bash(curl -sIL \"https://raw.githubusercontent.com/braedonsaunders/codeflow/main/README.md\")"
+      "Bash(curl -sIL \"https://raw.githubusercontent.com/braedonsaunders/codeflow/main/README.md\")",
+      "Bash(powershell -Command \"Remove-Item -Recurse -Force 'd:\\\\python_work_home\\\\ReqFlow\\\\repos\\\\canopy'\")",
+      "Bash(powershell -Command \"Remove-Item -Recurse -Force 'd:\\\\python_work_home\\\\ReqFlow\\\\repos\\\\omen-main'\")",
+      "Bash(powershell -Command \"Remove-Item -Recurse -Force 'd:\\\\python_work_home\\\\ReqFlow\\\\repos\\\\revos-main'\")",
+      "Bash(docker compose *)"
     ]
   }
 }
